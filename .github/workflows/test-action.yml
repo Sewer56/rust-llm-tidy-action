@@ -17,7 +17,14 @@ on:
 
 jobs:
   test-prebuilt-mode:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+          - os: windows-latest
+          - os: macos-latest
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout Action Repository
         uses: actions/checkout@v6
@@ -52,10 +59,10 @@ jobs:
           test "${{ steps.tidy.outputs.binary-path }}" != ""
           test -n "${{ steps.tidy.outputs.sevenzip-binary }}"
           grep -q "fn a()" fixture/src/main.rs
-          # a must come before b
+          # reorder places caller b() before callee a()
           a=$(grep -n "fn a()" fixture/src/main.rs | cut -d: -f1)
           b=$(grep -n "fn b()" fixture/src/main.rs | cut -d: -f1)
-          test "$a" -lt "$b"
+          test "$b" -lt "$a"
 
       - name: Run action again (prebuilt, check mode must pass)
         uses: ./
@@ -100,16 +107,19 @@ jobs:
       - name: Checkout Action Repository
         uses: actions/checkout@v6
 
-      - name: Create deliberately untidy file
+      - name: Create clean baseline repo, then untidy edit
         shell: bash
         run: |
           mkdir -p fixture
-          printf 'fn b() { a(); }\nfn a() {}\n' > fixture/lib.rs
+          # committed baseline = tidy
+          printf 'fn main() { init(); }\nfn init() {}\n' > fixture/lib.rs
           git init -q fixture
           git -C fixture config user.email ci@test
           git -C fixture config user.name ci
           git -C fixture add lib.rs
-          git -C fixture commit -qm init
+          git -C fixture commit -qm baseline
+          # working-tree edit = untidy (caller before callee is wrong order)
+          printf 'fn b() { a(); }\nfn a() {}\n' > fixture/lib.rs
 
       - name: Run action in check mode (must fail on dirty tree)
         id: dirty
@@ -117,6 +127,8 @@ jobs:
         uses: ./
         with:
           rust-project-path: fixture
+          paths: |
+            lib.rs
           include: "reorder"
           no-config: "true"
           mode: "check"
@@ -124,3 +136,61 @@ jobs:
       - name: Assert check mode failed
         shell: bash
         run: test "${{ steps.dirty.outcome }}" = "failure"
+
+      - name: Apply mode declares tree tidy and check passes after
+        uses: ./
+        with:
+          rust-project-path: fixture
+          paths: |
+            lib.rs
+          include: "reorder"
+          no-config: "true"
+          mode: "apply"
+
+      - name: Re-run check mode after apply (must pass)
+        uses: ./
+        with:
+          rust-project-path: fixture
+          paths: |
+            lib.rs
+          include: "reorder"
+          no-config: "true"
+          mode: "check"
+
+  test-skipping-prebuilt-7z-install-apt:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Action Repository
+        uses: actions/checkout@v6
+
+      - name: Create fixture
+        shell: bash
+        run: |
+          mkdir -p fixture
+          printf 'fn b() { a(); }\nfn a() {}\n' > fixture/lib.rs
+
+      - name: Install p7zip
+        shell: bash
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y p7zip-full
+
+      - name: Run action (prebuilt, apt 7z)
+        id: tidy
+        uses: ./
+        with:
+          rust-project-path: fixture
+          paths: |
+            lib.rs
+          include: "reorder"
+          no-config: "true"
+          sevenzip-source: "apt"
+          release-repo: Sewer56/rust-llm-tidy
+          release-tag: 0.1.0
+
+      - name: Assert apply worked
+        shell: bash
+        run: |
+          a=$(grep -n "fn a()" fixture/lib.rs | cut -d: -f1)
+          b=$(grep -n "fn b()" fixture/lib.rs | cut -d: -f1)
+          test "$b" -lt "$a"

@@ -20,17 +20,13 @@ inputs:
     required: false
     default: "Sewer56/rust-llm-tidy"
   release-tag:
-    description: >-
-      Release tag to download. Empty uses the latest release.
+    description: "Release tag to download. Empty uses the latest release."
     required: false
     default: ""
   download-asset:
     description: >-
       Exact release asset name to download. Overrides automatic target
-      detection (useful for testing). Naming convention: the binary asset is
-      `rust-llm-tidy-<target>` directly, or an archive
-      `rust-llm-tidy-<target>.tar.gz`/`.zip` containing a `rust-llm-tidy`
-      binary.
+      detection (useful for testing).
     required: false
     default: ""
   install-dir:
@@ -40,7 +36,7 @@ inputs:
     required: false
     default: "rust-llm-tidy-bin"
   cache-prebuilt:
-    description: "Whether to cache the downloaded binary across runs (keyed on release repo, tag and asset name)"
+    description: "Whether to cache the downloaded binary across runs"
     required: false
     default: "false"
 
@@ -48,10 +44,11 @@ inputs:
   sevenzip-source:
     description: >-
       Where the native 7-Zip used to extract release artifacts comes from.
-      'auto' uses a 7z/7zz on the runner if present, otherwise downloads a
-      standalone 7-Zip. 'fetch' always downloads. 'version:<x.y>' pins a
-      specific 7-Zip version (e.g. version:26.02). 'apt' (Linux) requires
-      p7zip-full pre-installed. 'preinstalled' requires 7z on the runner.
+      'auto' uses a 7z/7zz on the runner if present (incl. macOS/Windows
+      libarchive-tar), otherwise downloads a standalone 7-Zip. 'fetch' always
+      downloads. 'version:<x.y>' pins a specific 7-Zip version (e.g.
+      version:26.02). 'apt' (Linux) requires p7zip-full pre-installed.
+      'preinstalled' requires 7z on the runner.
     required: false
     default: "auto"
   cache-sevenzip:
@@ -66,12 +63,11 @@ inputs:
       expected at <path>/src/Cargo.toml. In the submodule layout the action
       lives at <repo>/submodules/action, so the default resolves to the
       enclosing rust-llm-tidy checkout at its CURRENT commit - use that to
-      tidy the repository it is vendored into. For standalone use, point this
-      at your own rust-llm-tidy checkout or set use-source-checkout: true.
+      tidy the repository it is vendored into.
     required: false
     default: "${{ github.action_path }}/.."
   use-source-checkout:
-    description: "Whether to checkout source-repo@source-repo-ref into $RUNNER_TEMP for building. Overrides source-path."
+    description: "Whether to checkout source-repo@source-repo-ref into the workspace for building. Overrides source-path."
     required: false
     default: "false"
   source-repo:
@@ -103,8 +99,8 @@ inputs:
   paths:
     description: >-
       Paths to tidy, one per line. Each directory is expanded recursively;
-      only .rs/.md files are processed. Empty runs rust-llm-tidy with no
-      paths (it then processes the changed files in the current git diff).
+      only .rs/.md files are processed. Empty runs rust-llm-tidy over '.' -
+      the entire rust-project-path.
     required: false
     default: ""
   mode:
@@ -152,28 +148,30 @@ runs:
   steps:
     # ── Source resolution (git mode) ─────────────────────────
     - name: Checkout rust-llm-tidy source
-      if: inputs.binary-source == 'git' && inputs.use-source-checkout == 'true'
+      if: >-
+        inputs.binary-source == 'git' &&
+        inputs.use-source-checkout == 'true'
       uses: actions/checkout@v6
       with:
         repository: ${{ inputs.source-repo }}
         ref: ${{ inputs.source-repo-ref }}
-        path: ${{ runner.temp }}/rust-llm-tidy-source
+        path: ${{ github.workspace }}/.rlt-source
 
     - name: Resolve source directory
       id: source
       shell: bash
       run: |
         if [ "${{ inputs.use-source-checkout }}" = "true" ]; then
-          echo "source_dir=${{ runner.temp }}/rust-llm-tidy-source" >> "$GITHUB_OUTPUT"
+          echo "source_dir=${{ github.workspace }}/.rlt-source" >> "$GITHUB_OUTPUT"
         else
-          echo "source_dir=${{ inputs.source-path }}" >> "$GITHUB_OUTPUT"
+          printf 'source_dir=%s\n' "${{ inputs.source-path }}" >> "$GITHUB_OUTPUT"
         fi
 
     # ── Prebuilt binary (prebuilt mode) ──────────────────────
     # Ensure a native 7-Zip CLI exists before extracting release artifacts.
     # resolve_artifact.py receives it via SEVENZIP_BINARY.
     - name: Ensure 7-Zip
-      if: inputs.binary-source == 'prebuilt'
+      if: inputs.binary-source == 'prebuilt' && inputs.sevenzip-source != 'preinstalled'
       id: sevenzip
       shell: bash
       run: python3 "${{ github.action_path }}/scripts/ensure_7z.py"
@@ -185,11 +183,36 @@ runs:
         GITHUB_TOKEN: ${{ github.token }}
 
     - name: Cache 7-Zip
-      if: inputs.binary-source == 'prebuilt' && inputs.cache-sevenzip == 'true'
+      if: >-
+        inputs.binary-source == 'prebuilt' &&
+        inputs.cache-sevenzip == 'true'
       uses: actions/cache@v4
       with:
         path: ${{ runner.temp }}/sevenzip-bin
-        key: sevenzip-${{ inputs.sevenzip-source }}
+        key: sevenzip-bin-${{ inputs.sevenzip-source }}
+
+    - name: Cache 7-Zip source archive
+      if: >-
+        inputs.binary-source == 'prebuilt' &&
+        inputs.cache-sevenzip == 'true'
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}/sevenzip-bin-src
+        key: sevenzip-src-${{ inputs.sevenzip-source }}
+
+    - name: Detect environment 7-Zip
+      if: >-
+        inputs.binary-source == 'prebuilt' &&
+        inputs.sevenzip-source == 'preinstalled'
+      id: sevenzip-env
+      shell: bash
+      run: python3 "${{ github.action_path }}/scripts/ensure_7z.py"
+      env:
+        INPUT_SEVENZIP_SOURCE: ${{ inputs.sevenzip-source }}
+        RUNNER_OS: ${{ runner.os }}
+        RUNNER_ARCH: ${{ runner.arch }}
+        RUNNER_TEMP: ${{ runner.temp }}
+        GITHUB_TOKEN: ${{ github.token }}
 
     - name: Install rust-llm-tidy from release artifact
       if: inputs.binary-source == 'prebuilt'
@@ -201,28 +224,28 @@ runs:
         INPUT_RELEASE_TAG: ${{ inputs.release-tag }}
         INPUT_DOWNLOAD_ASSET: ${{ inputs.download-asset }}
         INPUT_INSTALL_DIR: ${{ inputs.install-dir }}
-        SEVENZIP_BINARY: ${{ steps.sevenzip.outputs.sevenzip_binary }}
+        SEVENZIP_BINARY: ${{ steps.sevenzip.outputs.sevenzip_binary || steps.sevenzip-env.outputs.sevenzip_binary }}
         RUNNER_OS: ${{ runner.os }}
         RUNNER_ARCH: ${{ runner.arch }}
+        RUNNER_TEMP: ${{ runner.temp }}
         GITHUB_TOKEN: ${{ github.token }}
 
     - name: Cache prebuilt binary
-      if: inputs.binary-source == 'prebuilt' && inputs.cache-prebuilt == 'true'
+      if: >-
+        inputs.binary-source == 'prebuilt' &&
+        inputs.cache-prebuilt == 'true'
       uses: actions/cache@v4
       with:
         path: ${{ runner.temp }}/rust-llm-tidy-bin
-        key: ${{ inputs.release-repo }}-${{ steps.prebuilt.outputs.asset_name }}
-
-    - name: Cache 7-Zip source archive
-      if: inputs.binary-source == 'prebuilt' && inputs.cache-sevenzip == 'true'
-      uses: actions/cache@v4
-      with:
-        path: ${{ runner.temp }}/sevenzip-bin-src
-        key: sevenzip-src-${{ inputs.sevenzip-source }}
+        key: >-
+          ${{ inputs.release-repo }}-${{ inputs.release-tag }}-
+          ${{ steps.prebuilt.outputs.asset_name }}
 
     # ── Build from source (git mode) ─────────────────────────
     - name: Install Rust toolchain
-      if: inputs.binary-source == 'git' && inputs.install-rust-toolchain == 'true'
+      if: >-
+        inputs.binary-source == 'git' &&
+        inputs.install-rust-toolchain == 'true'
       uses: actions-rust-lang/setup-rust-toolchain@v1
       with:
         toolchain: ${{ inputs.rust-toolchain }}
@@ -241,15 +264,18 @@ runs:
       if: inputs.binary-source == 'git'
       id: build
       shell: bash
+      env:
+        RLT_SOURCE_DIR: ${{ steps.source.outputs.source_dir }}
       run: |
-        if [ ! -f "${{ steps.source.outputs.source_dir }}/src/Cargo.toml" ]; then
-          echo "::error::source-path ${{ steps.source.outputs.source_dir }} has no src/Cargo.toml; point source-path at a rust-llm-tidy checkout or set use-source-checkout: true" >&2
+        set -euo pipefail
+        if [ ! -f "$RLT_SOURCE_DIR/src/Cargo.toml" ]; then
+          echo "::error::source-path $RLT_SOURCE_DIR has no src/Cargo.toml; point source-path at a rust-llm-tidy checkout or set use-source-checkout: true" >&2
           exit 1
         fi
         cargo build --release \
-          --manifest-path "${{ steps.source.outputs.source_dir }}/src/Cargo.toml" \
+          --manifest-path "$RLT_SOURCE_DIR/src/Cargo.toml" \
           -p rust-llm-tidy-cli --bin rust-llm-tidy
-        BIN="${{ steps.source.outputs.source_dir }}/src/target/release/rust-llm-tidy"
+        BIN="$RLT_SOURCE_DIR/src/target/release/rust-llm-tidy"
         if [ ! -x "$BIN" ] && [ -x "$BIN.exe" ]; then
           BIN="$BIN.exe"
         fi
@@ -259,13 +285,17 @@ runs:
     - name: Resolve final binary path
       id: binary
       shell: bash
+      env:
+        RLT_BINARY_SOURCE: ${{ inputs.binary-source }}
+        RLT_PREBUILT_PATH: ${{ steps.prebuilt.outputs.binary_path }}
+        RLT_BUILD_PATH: ${{ steps.build.outputs.binary_path }}
       run: |
-        if [ "${{ inputs.binary-source }}" = "prebuilt" ]; then
-          echo "path=${{ steps.prebuilt.outputs.binary_path }}" >> "$GITHUB_OUTPUT"
-        elif [ "${{ inputs.binary-source }}" = "git" ]; then
-          echo "path=${{ steps.build.outputs.binary_path }}" >> "$GITHUB_OUTPUT"
+        if [ "$RLT_BINARY_SOURCE" = "prebuilt" ]; then
+          printf 'path=%s\n' "$RLT_PREBUILT_PATH" >> "$GITHUB_OUTPUT"
+        elif [ "$RLT_BINARY_SOURCE" = "git" ]; then
+          printf 'path=%s\n' "$RLT_BUILD_PATH" >> "$GITHUB_OUTPUT"
         else
-          echo "path=rust-llm-tidy" >> "$GITHUB_OUTPUT"
+          printf 'path=rust-llm-tidy\n' >> "$GITHUB_OUTPUT"
         fi
 
     # ── Tidy arguments ───────────────────────────────────────
@@ -273,41 +303,52 @@ runs:
       id: args
       shell: bash
       env:
+        RLT_VALIDATE: ${{ inputs.validate }}
+        RLT_NO_CONFIG: ${{ inputs.no-config }}
+        RLT_CONFIG_PATH: ${{ inputs.config-path }}
+        RLT_DRY_RUN: ${{ inputs.dry-run }}
         RLT_INCLUDE: ${{ inputs.include }}
         RLT_EXCLUDE: ${{ inputs.exclude }}
         RLT_PATHS: ${{ inputs.paths }}
       run: |
         args=()
 
-        if [ "${{ inputs.validate }}" = "true" ]; then
+        if [ "$RLT_VALIDATE" = "true" ]; then
           args+=(--validate)
         else
-          if [ "${{ inputs.no-config }}" = "true" ]; then
+          if [ "$RLT_NO_CONFIG" = "true" ]; then
             args+=(--no-config)
-          elif [ -n "${{ inputs.config-path }}" ]; then
-            args+=(--config "${{ inputs.config-path }}")
+          elif [ -n "$RLT_CONFIG_PATH" ]; then
+            args+=(--config "$RLT_CONFIG_PATH")
           fi
 
-          if [ "${{ inputs.dry-run }}" = "true" ]; then
+          if [ "$RLT_DRY_RUN" = "true" ]; then
             args+=(--dry-run)
           fi
 
           if [ -n "$RLT_INCLUDE" ]; then
-            for r in $(printf '%s' "$RLT_INCLUDE" | tr ',;' ' '); do
+            while IFS= read -r r; do
+              r="$(printf '%s' "$r" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
               [ -n "$r" ] && args+=(--include "$r")
-            done
+            done <<< "$(printf '%s' "$RLT_INCLUDE" | tr ',;' '\n')"
           fi
 
           if [ -n "$RLT_EXCLUDE" ]; then
-            for r in $(printf '%s' "$RLT_EXCLUDE" | tr ',;' ' '); do
+            while IFS= read -r r; do
+              r="$(printf '%s' "$r" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
               [ -n "$r" ] && args+=(--exclude "$r")
-            done
+            done <<< "$(printf '%s' "$RLT_EXCLUDE" | tr ',;' '\n')"
           fi
 
-          while IFS= read -r p; do
-            p="$(printf '%s' "$p" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-            [ -n "$p" ] && args+=("$p")
-          done <<< "$RLT_PATHS"
+          # Default to '.', i.e. tidy the whole rust-project-path recursively.
+          if [ -z "$RLT_PATHS" ]; then
+            args+=(".")
+          else
+            while IFS= read -r p; do
+              p="$(printf '%s' "$p" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+              [ -n "$p" ] && args+=("$p")
+            done <<< "$RLT_PATHS"
+          fi
         fi
 
         printf '%s\0' "${args[@]}" > "$RUNNER_TEMP/rlt-args"
@@ -319,6 +360,8 @@ runs:
       working-directory: ${{ inputs.rust-project-path }}
       env:
         RLT_BIN: ${{ steps.binary.outputs.path }}
+        RLT_MODE: ${{ inputs.mode }}
+        RLT_VALIDATE: ${{ inputs.validate }}
       run: |
         set -euo pipefail
 
@@ -332,7 +375,7 @@ runs:
         "$RLT_BIN" "${args[@]}"
 
         # 'check' mode: fail when tidying mutated the working tree.
-        if [ "${{ inputs.mode }}" = "check" ] && [ "${{ inputs.validate }}" != "true" ]; then
+        if [ "$RLT_MODE" = "check" ] && [ "$RLT_VALIDATE" != "true" ]; then
           if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
             if [ -n "$(git status --porcelain)" ]; then
               echo "::error::rust-llm-tidy check failed: working tree is not tidy" >&2

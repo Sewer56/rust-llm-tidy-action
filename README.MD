@@ -13,7 +13,7 @@ own CI (vendored as a submodule) and as a general-purpose action.
      enclosing repository (submodule layout) or a pinned remote checkout.
   3. **`none`** - uses a `rust-llm-tidy` already on `PATH`.
 - Runs it against your Rust/Markdown paths, or (with no `paths`) against the
-  changed files in the current git diff.
+  whole `rust-project-path` (`.`).
 - **`mode: check`** fails the job if the working tree is not tidy (mutation is
   left in place for inspection). **`mode: apply`** (default) just tidies.
 
@@ -66,11 +66,17 @@ repository against its own current source:
 - uses: Sewer56/rust-llm-tidy-action@v1
   with:
     binary-source: 'git'
-    use-source-checkout: 'true'   # checkout Sewer56/rust-llm-tidy@<ref> into $RUNNER_TEMP
+    use-source-checkout: 'true'   # checkout Sewer56/rust-llm-tidy@<ref> into the workspace
     source-repo-ref: '<SHA or tag>'
     rust-project-path: '.'
     mode: 'check'
 ```
+
+> **Note on `mode: check`:** the check compares the working tree against git
+> (`git status --porcelain`). Keep a tidy baseline committed and apply edits
+> as uncommitted changes - check fails when tidying would change them. If the
+> untidiness is itself committed as `HEAD`, `git status` stays clean and check
+> cannot detect it.
 
 ## Releases
 
@@ -112,14 +118,14 @@ A downloaded 7-Zip is cached in `$RUNNER_TEMP/sevenzip-bin`; enable
 | `sevenzip-source`      | Where the native 7-Zip comes from (`auto`/`fetch`/`version:<v>`/`apt`/`preinstalled`) | `auto`                       |
 | `cache-sevenzip`       | Cache a downloaded standalone 7-Zip                                          | `false`                              |
 | `source-path`          | Path to a rust-llm-tidy source checkout (`<path>/src/Cargo.toml` expected)   | `${{ github.action_path }}/..`       |
-| `use-source-checkout`  | Checkout `source-repo@source-repo-ref` into `$RUNNER_TEMP`                   | `false`                              |
+| `use-source-checkout`  | Checkout `source-repo@source-repo-ref` into the workspace                  | `false`                              |
 | `source-repo`          | Source repo for `use-source-checkout`                                        | `Sewer56/rust-llm-tidy`              |
 | `source-repo-ref`      | Branch/tag/SHA to checkout (pin a SHA for reproducibility)                  | `main`                               |
 | `install-rust-toolchain`| Install Rust toolchain for `git` build                                       | `true`                               |
 | `rust-toolchain`       | Toolchain for `git` build                                                    | `stable`                             |
 | `setup-rust-cache`     | Restore/save rust cache for `git` build                                      | `true`                               |
 | `rust-project-path`    | Working directory for tidy run and git diff check                            | `${{ github.workspace }}`            |
-| `paths`                | Paths to tidy (one per line; empty = git diff changed files)                 | `''`                                 |
+| `paths`                | Paths to tidy (one per line). Empty tidies `.` (the whole rust-project-path) | `''`                                 |
 | `mode`                 | `apply` or `check`                                                           | `apply`                              |
 | `config-path`          | Explicit `.rust-llm-tidy.yml` path (`--config`)                              | `''`                                 |
 | `no-config`            | Disable config discovery (`--no-config`)                                     | `false`                              |

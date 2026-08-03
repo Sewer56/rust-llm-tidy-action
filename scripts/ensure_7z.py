@@ -54,10 +54,11 @@ def download(url: str, dest: Path, token: str):
 
 def emit_output(name: str, value: str):
     out_path = os.environ.get("GITHUB_OUTPUT")
-    if out_path:
-        with open(out_path, "a") as f:
-            f.write(f"{name}={value}\n")
-    print(f"::set-output name={name}::{value}")  # noqa: C0209
+    if not out_path:
+        print(f"{name}={value}")
+        return
+    with open(out_path, "a") as f:
+        f.write(f"{name}={value}\n")
 
 
 def is_libarchive_tar(exe: str) -> bool:
