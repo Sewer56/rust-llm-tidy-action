@@ -42,7 +42,7 @@ jobs:
             src/main.rs
           include: "reorder"
           no-config: "true"
-          # no releases matching this repo yet with the action's convention
+          sevenzip-source: "fetch"   # force standalone 7-Zip download path
           release-repo: Sewer56/rust-llm-tidy
           release-tag: 0.1.0
 
@@ -50,6 +50,7 @@ jobs:
         shell: bash
         run: |
           test "${{ steps.tidy.outputs.binary-path }}" != ""
+          test -n "${{ steps.tidy.outputs.sevenzip-binary }}"
           grep -q "fn a()" fixture/src/main.rs
           # a must come before b
           a=$(grep -n "fn a()" fixture/src/main.rs | cut -d: -f1)

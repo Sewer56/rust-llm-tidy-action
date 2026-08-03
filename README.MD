@@ -82,8 +82,22 @@ triple (`x86_64-unknown-linux-gnu`) or the compact form used by
 `macos-arm64`, `macos-x64`, `windows-x64`, `windows-x86`). Archives extract to
 a single `rust-llm-tidy`/`rust-llm-tidy.exe`.
 
-`7z` extraction: Windows runners include 7-Zip, macOS `tar` is libarchive, and
-Linux installs `p7zip-full` automatically (with a pure-Python `py7zr` fallback).
+### Extraction with native 7-Zip
+
+The action uses the **native 7-Zip CLI** (`7z`/`7zz`) to extract release
+archives - no `py7zr`/Python archiver dependency. How the 7-Zip binary is
+found depends on `sevenzip-source`:
+
+| Value            | Behaviour                                                                  |
+| ---------------- | -------------------------------------------------------------------------- |
+| `auto` (default) | Use `7z`/`7zz` already on the runner (incl. Windows `Program Files\7-Zip`, macOS libarchive `tar`); otherwise download a standalone 7-Zip from [ip7z/7zip](https://github.com/ip7z/7zip) releases |
+| `fetch`          | Always download a standalone 7-Zip (GitHub ip7z/7zip releases)             |
+| `version:<x.y>`  | Download a specific 7-Zip version, e.g. `version:26.02`                    |
+| `apt`            | Linux only: require `p7zip-full` already installed (no download)           |
+| `preinstalled`   | Require `7z`/`7zz` on the runner (no download)                             |
+
+A downloaded 7-Zip is cached in `$RUNNER_TEMP/sevenzip-bin`; enable
+`cache-sevenzip: true` to cache it across runs.
 
 ## Inputs
 
@@ -95,6 +109,8 @@ Linux installs `p7zip-full` automatically (with a pure-Python `py7zr` fallback).
 | `download-asset`       | Exact asset name (overrides target detection)                                | `''`                                 |
 | `install-dir`          | Install dir (relative resolves under `$RUNNER_TEMP`)                         | `rust-llm-tidy-bin`                  |
 | `cache-prebuilt`       | Cache the downloaded binary                                                  | `false`                              |
+| `sevenzip-source`      | Where the native 7-Zip comes from (`auto`/`fetch`/`version:<v>`/`apt`/`preinstalled`) | `auto`                       |
+| `cache-sevenzip`       | Cache a downloaded standalone 7-Zip                                          | `false`                              |
 | `source-path`          | Path to a rust-llm-tidy source checkout (`<path>/src/Cargo.toml` expected)   | `${{ github.action_path }}/..`       |
 | `use-source-checkout`  | Checkout `source-repo@source-repo-ref` into `$RUNNER_TEMP`                   | `false`                              |
 | `source-repo`          | Source repo for `use-source-checkout`                                        | `Sewer56/rust-llm-tidy`              |
@@ -118,6 +134,7 @@ Linux installs `p7zip-full` automatically (with a pure-Python `py7zr` fallback).
 | ------------- | ---------------------------------------------------- |
 | `binary-path` | Path to the `rust-llm-tidy` binary that was used    |
 | `source-dir`  | Resolved source directory (`git` mode only)          |
+| `sevenzip-binary` | Path to the 7-Zip binary used                   |
 
 ## Development
 

@@ -44,6 +44,21 @@ inputs:
     required: false
     default: "false"
 
+  # 7-Zip extraction
+  sevenzip-source:
+    description: >-
+      Where the native 7-Zip used to extract release artifacts comes from.
+      'auto' uses a 7z/7zz on the runner if present, otherwise downloads a
+      standalone 7-Zip. 'fetch' always downloads. 'version:<x.y>' pins a
+      specific 7-Zip version (e.g. version:26.02). 'apt' (Linux) requires
+      p7zip-full pre-installed. 'preinstalled' requires 7z on the runner.
+    required: false
+    default: "auto"
+  cache-sevenzip:
+    description: "Whether to cache a downloaded standalone 7-Zip across runs"
+    required: false
+    default: "false"
+
   # Git-build mode
   source-path:
     description: >-
@@ -128,6 +143,9 @@ outputs:
   source-dir:
     description: "Resolved rust-llm-tidy source directory (git mode only)"
     value: ${{ steps.source.outputs.source_dir }}
+  sevenzip-binary:
+    description: "Path to the 7-Zip binary used for extraction"
+    value: ${{ steps.sevenzip.outputs.sevenzip_binary }}
 
 runs:
   using: "composite"
@@ -152,18 +170,26 @@ runs:
         fi
 
     # ── Prebuilt binary (prebuilt mode) ──────────────────────
-    # 7z is built into Windows runners (C:\Program Files\7-Zip) and macOS tar
-    # (libarchive); Linux needs p7zip. resolve_artifact.py falls back to
-    # py7zr/pip when no 7z binary is present.
-    - name: Install 7-Zip
-      if: inputs.binary-source == 'prebuilt' && runner.os == 'Linux'
+    # Ensure a native 7-Zip CLI exists before extracting release artifacts.
+    # resolve_artifact.py receives it via SEVENZIP_BINARY.
+    - name: Ensure 7-Zip
+      if: inputs.binary-source == 'prebuilt'
+      id: sevenzip
       shell: bash
-      run: |
-        if ! command -v 7z >/dev/null 2>&1 && ! command -v 7zz >/dev/null 2>&1; then
-          sudo apt-get update || true
-          sudo apt-get install -y p7zip-full || true
-        fi
-        command -v 7z || command -v 7zz || echo "no 7z binary (using py7zr fallback)"
+      run: python3 "${{ github.action_path }}/scripts/ensure_7z.py"
+      env:
+        INPUT_SEVENZIP_SOURCE: ${{ inputs.sevenzip-source }}
+        RUNNER_OS: ${{ runner.os }}
+        RUNNER_ARCH: ${{ runner.arch }}
+        RUNNER_TEMP: ${{ runner.temp }}
+        GITHUB_TOKEN: ${{ github.token }}
+
+    - name: Cache 7-Zip
+      if: inputs.binary-source == 'prebuilt' && inputs.cache-sevenzip == 'true'
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}/sevenzip-bin
+        key: sevenzip-${{ inputs.sevenzip-source }}
 
     - name: Install rust-llm-tidy from release artifact
       if: inputs.binary-source == 'prebuilt'
@@ -175,6 +201,7 @@ runs:
         INPUT_RELEASE_TAG: ${{ inputs.release-tag }}
         INPUT_DOWNLOAD_ASSET: ${{ inputs.download-asset }}
         INPUT_INSTALL_DIR: ${{ inputs.install-dir }}
+        SEVENZIP_BINARY: ${{ steps.sevenzip.outputs.sevenzip_binary }}
         RUNNER_OS: ${{ runner.os }}
         RUNNER_ARCH: ${{ runner.arch }}
         GITHUB_TOKEN: ${{ github.token }}
@@ -185,6 +212,13 @@ runs:
       with:
         path: ${{ runner.temp }}/rust-llm-tidy-bin
         key: ${{ inputs.release-repo }}-${{ steps.prebuilt.outputs.asset_name }}
+
+    - name: Cache 7-Zip source archive
+      if: inputs.binary-source == 'prebuilt' && inputs.cache-sevenzip == 'true'
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}/sevenzip-bin-src
+        key: sevenzip-src-${{ inputs.sevenzip-source }}
 
     # ── Build from source (git mode) ─────────────────────────
     - name: Install Rust toolchain
