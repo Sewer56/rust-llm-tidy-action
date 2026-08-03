@@ -27,7 +27,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout Action Repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Create standalone git repo fixture with untidy baseline
         shell: bash
@@ -113,7 +113,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Action Repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Run action (git mode, build from source checkout)
         id: tidy
@@ -140,7 +140,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Action Repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Create clean baseline repo, then untidy edit
         shell: bash
@@ -202,7 +202,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Action Repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Create fixture
         shell: bash
