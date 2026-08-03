@@ -1,0 +1,125 @@
+name: Test rust-llm-tidy Action
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - "action.yml"
+      - "scripts/**"
+      - ".github/workflows/test-action.yml"
+  push:
+    branches: [main]
+    paths:
+      - "action.yml"
+      - "scripts/**"
+      - ".github/workflows/test-action.yml"
+
+jobs:
+  test-prebuilt-mode:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Action Repository
+        uses: actions/checkout@v6
+
+      - name: Create fixture source
+        shell: bash
+        run: |
+          mkdir -p fixture/src
+          cat > fixture/src/main.rs <<'EOF'
+          fn b() { a(); }
+          fn a() {}
+
+          pub fn hello() {}
+          EOF
+
+      - name: Run action (prebuilt, apply)
+        id: tidy
+        uses: ./
+        with:
+          rust-project-path: fixture
+          paths: |
+            src/main.rs
+          include: "reorder"
+          no-config: "true"
+          # no releases matching this repo yet with the action's convention
+          release-repo: Sewer56/rust-llm-tidy
+          release-tag: 0.1.0
+
+      - name: Assert applied + reordered
+        shell: bash
+        run: |
+          test "${{ steps.tidy.outputs.binary-path }}" != ""
+          grep -q "fn a()" fixture/src/main.rs
+          # a must come before b
+          a=$(grep -n "fn a()" fixture/src/main.rs | cut -d: -f1)
+          b=$(grep -n "fn b()" fixture/src/main.rs | cut -d: -f1)
+          test "$a" -lt "$b"
+
+      - name: Run action again (prebuilt, check mode must pass)
+        uses: ./
+        with:
+          rust-project-path: fixture
+          include: "reorder"
+          no-config: "true"
+          mode: "check"
+          release-repo: Sewer56/rust-llm-tidy
+          release-tag: 0.1.0
+
+  test-git-mode:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Action Repository
+        uses: actions/checkout@v6
+
+      - name: Run action (git mode, build from source checkout)
+        id: tidy
+        uses: ./
+        with:
+          binary-source: "git"
+          use-source-checkout: "true"
+          source-repo: "Sewer56/rust-llm-tidy"
+          source-repo-ref: "main"
+          rust-project-path: ${{ github.workspace }}
+          include: "reorder"
+          no-config: "true"
+          dry-run: "true"
+
+      - name: Assert built binary works
+        shell: bash
+        run: |
+          BIN="${{ steps.tidy.outputs.binary-path }}"
+          test -n "$BIN"
+          test -x "$BIN"
+          "$BIN" --help | grep -q "dry-run"
+
+  test-check-mode-fails-on-dirty:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Action Repository
+        uses: actions/checkout@v6
+
+      - name: Create deliberately untidy file
+        shell: bash
+        run: |
+          mkdir -p fixture
+          printf 'fn b() { a(); }\nfn a() {}\n' > fixture/lib.rs
+          git init -q fixture
+          git -C fixture config user.email ci@test
+          git -C fixture config user.name ci
+          git -C fixture add lib.rs
+          git -C fixture commit -qm init
+
+      - name: Run action in check mode (must fail on dirty tree)
+        id: dirty
+        continue-on-error: true
+        uses: ./
+        with:
+          rust-project-path: fixture
+          include: "reorder"
+          no-config: "true"
+          mode: "check"
+
+      - name: Assert check mode failed
+        shell: bash
+        run: test "${{ steps.dirty.outcome }}" = "failure"
