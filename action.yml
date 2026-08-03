@@ -186,7 +186,7 @@ runs:
       if: >-
         inputs.binary-source == 'prebuilt' &&
         inputs.cache-sevenzip == 'true'
-      uses: actions/cache@v4
+      uses: actions/cache@v6
       with:
         path: ${{ runner.temp }}/sevenzip-bin
         key: sevenzip-bin-${{ inputs.sevenzip-source }}
@@ -195,7 +195,7 @@ runs:
       if: >-
         inputs.binary-source == 'prebuilt' &&
         inputs.cache-sevenzip == 'true'
-      uses: actions/cache@v4
+      uses: actions/cache@v6
       with:
         path: ${{ runner.temp }}/sevenzip-bin-src
         key: sevenzip-src-${{ inputs.sevenzip-source }}
@@ -234,7 +234,7 @@ runs:
       if: >-
         inputs.binary-source == 'prebuilt' &&
         inputs.cache-prebuilt == 'true'
-      uses: actions/cache@v4
+      uses: actions/cache@v6
       with:
         path: ${{ runner.temp }}/rust-llm-tidy-bin
         key: >-
