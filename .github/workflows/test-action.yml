@@ -29,7 +29,7 @@ jobs:
       - name: Checkout Action Repository
         uses: actions/checkout@v6
 
-      - name: Create fixture source
+      - name: Create standalone git repo fixture with untidy baseline
         shell: bash
         run: |
           mkdir -p fixture/src
@@ -39,6 +39,11 @@ jobs:
 
           pub fn hello() {}
           EOF
+          git init -q fixture
+          git -C fixture config user.email ci@test
+          git -C fixture config user.name ci
+          git -C fixture add -A
+          git -C fixture commit -qm "untidy baseline"
 
       - name: Run action (prebuilt, apply)
         id: tidy
@@ -64,15 +69,45 @@ jobs:
           b=$(grep -n "fn b()" fixture/src/main.rs | cut -d: -f1)
           test "$b" -lt "$a"
 
+      - name: Commit applied result
+        shell: bash
+        run: |
+          git -C fixture add -A
+          git -C fixture commit -qm "applied tidy"
+
       - name: Run action again (prebuilt, check mode must pass)
         uses: ./
         with:
           rust-project-path: fixture
+          paths: |
+            src/main.rs
           include: "reorder"
           no-config: "true"
           mode: "check"
           release-repo: Sewer56/rust-llm-tidy
           release-tag: 0.1.0
+
+      - name: Reintroduce untidy edit
+        shell: bash
+        run: printf 'fn b() { a(); }\nfn a() {}\n' > fixture/src/main.rs
+
+      - name: Check mode must fail on untidy
+        id: dirty
+        continue-on-error: true
+        uses: ./
+        with:
+          rust-project-path: fixture
+          paths: |
+            src/main.rs
+          include: "reorder"
+          no-config: "true"
+          mode: "check"
+          release-repo: Sewer56/rust-llm-tidy
+          release-tag: 0.1.0
+
+      - name: Assert recheck failed on untidy
+        shell: bash
+        run: test "${{ steps.dirty.outcome }}" = "failure"
 
   test-git-mode:
     runs-on: ubuntu-latest
@@ -146,6 +181,12 @@ jobs:
           include: "reorder"
           no-config: "true"
           mode: "apply"
+
+      - name: Commit applied result
+        shell: bash
+        run: |
+          git -C fixture add -A
+          git -C fixture commit -qm "applied tidy"
 
       - name: Re-run check mode after apply (must pass)
         uses: ./
