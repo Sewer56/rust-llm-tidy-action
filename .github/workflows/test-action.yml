@@ -274,7 +274,7 @@ jobs:
           cat > "$RUNNER_TEMP/bin/tidy" <<'SH'
           #!/usr/bin/env bash
           printf 'fn main() { init(); }\nfn init() {}\n' > lib.rs
-          printf '%s\n' '[{"path":"lib.rs","line":1,"severity":"error","code":"DOC001","message":"non-private item is missing a doc comment (fn `hello`)","item_kind":"fn","item_name":"hello"}]'
+          printf '%s\n' '[{"path":"lib.rs","line":1,"severity":"error","code":"DOC001","message":"non-private item | note missing a doc comment (fn `hello`)","item_kind":"fn","item_name":"hello"}]'
           exit "${RLT_STUB_RC:-0}"
           SH
           chmod +x "$RUNNER_TEMP/bin/gh" "$RUNNER_TEMP/bin/tidy"
@@ -290,6 +290,12 @@ jobs:
                   open('run.sh', 'w').write(s['run'])
           PY
           sed 's/^        //' run.sh > "$RUNNER_TEMP/run_dedent.sh"
+          # The extracted script references the helper via the runtime template
+          # ${{ github.action_path }}, which GitHub only substitutes when the
+          # composite action runs via `uses:`. This harness runs the script
+          # directly with bash from the action checkout, so resolve the helper
+          # path to this checkout now (PWD is the action repo working dir).
+          sed -i "s#\${{ github.action_path }}#$PWD#g" "$RUNNER_TEMP/run_dedent.sh"
 
           git init -q --bare "$RUNNER_TEMP/origin"
           git init -q "$RUNNER_TEMP/repo"
@@ -365,7 +371,8 @@ jobs:
           # table rendered from the JSON document with the Severity column
           grep -q '| File | Line | Severity | Code | Reason |' "$RUNNER_TEMP/rlt-comment.md"
           grep -q 'DOC001' "$RUNNER_TEMP/rlt-comment.md"
-          grep -q 'non-private item is missing a doc comment' "$RUNNER_TEMP/rlt-comment.md"
+          # pipe in the reason cell is escaped so it cannot split the table
+          grep -q 'non-private item &#124; note missing' "$RUNNER_TEMP/rlt-comment.md"
           # check mode must NOT commit
           test "$(git rev-parse HEAD)" = "$(git rev-parse HEAD~0)"
 
