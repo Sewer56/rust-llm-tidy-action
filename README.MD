@@ -269,7 +269,7 @@ All files are tidy - no changes required.
 
 **2. Changes** - green, but the run recorded changes it would make (`dry-run`)
 or that fall short of a push; shows a "Changes" block. Table and link fixes
-carry no line number, shown as `0`:
+carry no line number, shown as `-`:
 
 ```markdown
 ## rust-llm-tidy: changes
@@ -277,7 +277,7 @@ carry no line number, shown as `0`:
 ### Changes
 | File          | Line | Code      | Change                                                        |
 | ------------- | ---- | --------- | ------------------------------------------------------------- |
-| `README.md`   | 0    | `FIX`     | tables were aligned                                           |
+| `README.md`   | -    | `FIX`     | tables were aligned                                           |
 | `src/main.rs` | 5    | `VIS`     | narrow visibility of `helper` at line 5                       |
 | `src/main.rs` | 9    | `REORDER` | rearrange fn `a_main` from pos 3 to pos 1 (before `b_helper`) |
 | `README.md`   | 12   | `FIX`     | flip nested fence at line 12                                  |

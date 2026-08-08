@@ -25,6 +25,18 @@ import json
 import sys
 
 
+def fmt_line(raw):
+    """Column text for a record's line.
+
+    Records that carry a line render it as-is; records with no specific line
+    (an absent, `null`, or empty value - the CLI serializes a missing line as
+    `null`, e.g. for link and table fixes) render `-` so the reader can tell
+    "no line" from line 1..n. A numeric `0` is also tolerated (older binaries
+    emitted it as the no-line sentinel).
+    """
+    return "-" if not raw else raw
+
+
 def main(json_path):
     try:
         with open(json_path, encoding="utf-8") as fh:
@@ -46,7 +58,7 @@ def main(json_path):
         rows.append("| ---- | ---- | -------- | ---- | ------ |")
         for d in lints:
             path = d.get("path", "")
-            line = d.get("line", "")
+            line = fmt_line(d.get("line"))
             severity = d.get("severity", "")
             code = d.get("code", "")
             reason = str(d.get("message", "")).replace("|", "&#124;")
@@ -58,7 +70,7 @@ def main(json_path):
         rows.append("| ---- | ---- | ---- | ------ |")
         for d in changes:
             path = d.get("path", "")
-            line = d.get("line", "")
+            line = fmt_line(d.get("line"))
             code = d.get("code", "")
             change = str(d.get("message", "")).replace("|", "&#124;")
             rows.append(f"| `{path}` | {line} | `{code}` | {change} |")
