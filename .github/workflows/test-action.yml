@@ -277,7 +277,32 @@ jobs:
           printf '%s\n' '[{"path":"lib.rs","line":1,"severity":"error","code":"DOC001","message":"non-private item | note missing a doc comment (fn `hello`)","item_kind":"fn","item_name":"hello"}]'
           exit "${RLT_STUB_RC:-0}"
           SH
-          chmod +x "$RUNNER_TEMP/bin/gh" "$RUNNER_TEMP/bin/tidy"
+          # The dry-run stub: reports the changes a transformation would make
+          # (a `severity:"success"` reorder record, with a pipe in the message
+          # to prove it stays escaped in the comment) and does NOT edit files.
+          cat > "$RUNNER_TEMP/bin/tidy-dry-run" <<'SH'
+          #!/usr/bin/env bash
+          printf '%s\n' '[{"path":"lib.rs","line":1,"severity":"success","code":"REORDER","message":"rearrange fn a_main | from pos 2 to pos 1 (before b_helper)","item_kind":"fn","item_name":"a_main","from":2,"to":1,"before_name":"b_helper"}]'
+          exit "${RLT_STUB_RC:-0}"
+          SH
+          # The clean stub: writes the tidy content (no diff) and emits an empty
+          # JSON doc, so an already-tidy PR hits the green-tick "all tidy"
+          # branch of the run script.
+          cat > "$RUNNER_TEMP/bin/tidy-clean" <<'SH'
+          #!/usr/bin/env bash
+          printf 'fn main() { init(); }\nfn init() {}\n' > lib.rs
+          printf '%s\n' '[]'
+          exit "${RLT_STUB_RC:-0}"
+          SH
+          # The doc-gap stub: emits only an error-severity lint row (no success
+          # change record) and does NOT edit the tree, exercising the empty-files
+          # lint-only failing dry-run branch of the run script.
+          cat > "$RUNNER_TEMP/bin/tidy-docgap" <<'SH'
+          #!/usr/bin/env bash
+          printf '%s\n' '[{"path":"lib.rs","line":1,"severity":"error","code":"DOC001","message":"missing doc comment for `hello`","item_kind":"fn","item_name":"hello"}]'
+          exit "${RLT_STUB_RC:-1}"
+          SH
+          chmod +x "$RUNNER_TEMP/bin/gh" "$RUNNER_TEMP/bin/tidy" "$RUNNER_TEMP/bin/tidy-dry-run" "$RUNNER_TEMP/bin/tidy-clean" "$RUNNER_TEMP/bin/tidy-docgap"
 
       - name: Extract run script + create fixture repo
         shell: bash
@@ -393,7 +418,7 @@ jobs:
           grep -q "fn init()" lib.rs      # mutated
           test ! -f "$RUNNER_TEMP/rlt-comment.md"   # no comment written
 
-      - name: already tidy (expect exit 0, no comment)
+      - name: already tidy (expect exit 0 + green-tick success comment)
         shell: bash
         run: |
           cd "$RUNNER_TEMP/repo"
@@ -402,10 +427,73 @@ jobs:
           rm -f "$RUNNER_TEMP/rlt-comment.md"
           export PATH="$RUNNER_TEMP/bin:$PATH"
           export MODE=apply IS_PR=true PR_NUMBER=7 HEAD_REF=feature
-          export COMMIT_NAME=bot COMMIT_EMAIL=b@b GITHUB_TOKEN=x RLT_BIN="$RUNNER_TEMP/bin/tidy"
+          export COMMIT_NAME=bot COMMIT_EMAIL=b@b GITHUB_TOKEN=x RLT_BIN="$RUNNER_TEMP/bin/tidy-clean"
           bash "$RUNNER_TEMP/run_dedent.sh"
           echo "exit=$? (expect 0)"
-          test ! -f "$RUNNER_TEMP/rlt-comment.md"
+          grep -q "all tidy" "$RUNNER_TEMP/rlt-comment.md"
+
+      - name: dry-run reports changes in a Changes block (expect exit 0)
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP/repo"
+          # tidy tree: dry-run records would-be changes without editing.
+          git reset -q --hard tidy-base && git clean -qfd
+          rm -f "$RUNNER_TEMP/rlt-comment.md"
+          export PATH="$RUNNER_TEMP/bin:$PATH"
+          export MODE=check IS_PR=true PR_NUMBER=7 HEAD_REF=feature
+          export COMMIT_NAME=bot COMMIT_EMAIL=b@b GITHUB_TOKEN=x RLT_BIN="$RUNNER_TEMP/bin/tidy-dry-run"
+          bash "$RUNNER_TEMP/run_dedent.sh"
+          rc=$?
+          echo "exit=$rc (expect 0; dry-run reports changes, tree untouched)"
+          test "$rc" = 0
+          # change record rendered into a Changes block, pipe escaped
+          grep -q '^### Changes' "$RUNNER_TEMP/rlt-comment.md"
+          grep -q 'REORDER' "$RUNNER_TEMP/rlt-comment.md"
+          grep -q 'rearrange fn a_main &#124; from pos 2 to pos 1' "$RUNNER_TEMP/rlt-comment.md"
+
+      - name: args builder requests JSON for dry-run too
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import yaml
+          d = yaml.safe_load(open('action.yml'))
+          for s in d['runs']['steps']:
+              if s.get('id') == 'args':
+                  open('args.sh', 'w').write(s['run'])
+          PY
+          sed 's/^        //' args.sh > "$RUNNER_TEMP/args_dedent.sh"
+          # Substitute the ${{ inputs.* }} templates that appear in the args
+          # step's run body (dry-run = true) so it runs standalone like the
+          # real action, exactly as the run-script harness substitutes
+          # ${{ github.action_path }}. The remaining inputs are wired via the
+          # RLT_* env vars below.
+          sed -i -e 's#\${{ inputs.validate }}#false#g' \
+            -e 's#\${{ inputs.no-config }}#false#g' \
+            -e 's#\${{ inputs.dry-run }}#true#g' \
+            "$RUNNER_TEMP/args_dedent.sh"
+          cd "$RUNNER_TEMP/repo"
+          RLT_CONFIG_PATH= RLT_INCLUDE= RLT_EXCLUDE= \
+          RLT_PATH_LIST= RLT_DEFAULT_FILES= RLT_CHANGED_FILES= \
+          bash "$RUNNER_TEMP/args_dedent.sh"
+          args=(); while IFS= read -r -d '' a; do args+=("$a"); done < "$RUNNER_TEMP/rlt-args"
+          printf '%s\n' "${args[@]}" | grep -q -- '--dry-run'
+          printf '%s\n' "${args[@]}" | grep -q -- '--output-mode json'
+          test "${#args[@]}" -gt 0
+
+      - name: check + PR, lint-only failing dry-run (expect report + exit 1)
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP/repo"
+          git reset -q --hard tidy-base && git clean -qfd
+          rm -f "$RUNNER_TEMP/rlt-comment.md"
+          export PATH="$RUNNER_TEMP/bin:$PATH"
+          export MODE=check IS_PR=true PR_NUMBER=7 HEAD_REF=feature
+          export COMMIT_NAME=bot COMMIT_EMAIL=b@b GITHUB_TOKEN=x
+          export RLT_BIN="$RUNNER_TEMP/bin/tidy-docgap" RLT_STUB_RC=1
+          bash "$RUNNER_TEMP/run_dedent.sh" && { echo "should have failed"; exit 1; } || true
+          grep -q 'not tidy' "$RUNNER_TEMP/rlt-comment.md"
+          grep -q '| File | Line | Severity | Code | Reason |' "$RUNNER_TEMP/rlt-comment.md"
+          grep -q 'DOC001' "$RUNNER_TEMP/rlt-comment.md"
 
   test-skipping-prebuilt-7z-install-apt:
     runs-on: ubuntu-latest

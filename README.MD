@@ -37,13 +37,22 @@ listing the offending/fixed files is posted.
 ### JSON-only consumption
 
 The action invokes `rust-llm-tidy` with `--output-mode json` on every real run
-(never with `--dry-run` or `--validate`) and builds the PR "not tidy" table
-(`| File | Line | Severity | Code | Reason |`) solely from the parsed JSON
-document that the binary writes to stdout; the exit code remains the gating
-signal. There is no plaintext/sed fallback.
+and on dry-run (only `--validate` skips it) and builds the PR comment solely
+from the parsed JSON document that the binary writes to stdout; the exit code
+remains the gating signal. There is no plaintext/sed fallback.
+
+The single JSON document carries both lint findings and transformation-change
+records under one base schema (`path, line, severity, code, message,
+item_kind, item_name`). Lint findings use `error`/`warning` severities and
+render into the "not tidy" lint table
+(`| File | Line | Severity | Code | Reason |`); dry-run runs report the edits
+the enabled transformations would apply as `severity: "success"` records,
+which render into a "Changes" block alongside the lint table. Recorded changes
+therefore surface in the PR comment just like lint findings, on both success
+and failure, while dry-run still never edits the tree.
 
 This means the action requires a `rust-llm-tidy` binary that supports
-`--output-mode json`:
+`--output-mode json` (including on dry-run):
 
 - **`prebuilt`** - the `release-tag` must point at a release (or the latest
   release must be) built from a version of `rust-llm-tidy` that includes JSON

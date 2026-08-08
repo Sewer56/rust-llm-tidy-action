@@ -379,13 +379,14 @@ runs:
             args+=(--config "$RLT_CONFIG_PATH")
           fi
 
+          # The action consumes lint findings and recorded changes from JSON
+          # only. Both real and dry-run runs emit one JSON document (dry-run
+          # reports the changes a transformation would make instead of editing),
+          # so request JSON output unconditionally here.
+          args+=(--output-mode json)
+
           if [ "${{ inputs.dry-run }}" = "true" ]; then
             args+=(--dry-run)
-          else
-            # The action consumes lint findings from JSON only. JSON conflicts
-            # with --dry-run (which reconstructs file contents on stdout), so
-            # it is added for every real run but never alongside --dry-run.
-            args+=(--output-mode json)
           fi
 
           if [ -n "$RLT_INCLUDE" ]; then
@@ -485,15 +486,40 @@ runs:
         # Files this run changed (the fixes), if any.
         files="$( { git diff --name-only HEAD || true; git ls-files --others --exclude-standard; } | sort -u )"
 
-        # Already tidy (or tool error with no edits): confirm success on PRs
-        # with a green-tick comment, then pass the tool's status through.
+        # Nothing changed on disk. This also happens for dry-run, which reports
+        # the changes a transformation would make (`severity: "success"`
+        # records) without editing the tree, and for non-mutating lint-only
+        # failures. Surface whatever json_table.py rendered (a "Changes" block
+        # and/or the lint table) so the PR shows why the check is green or red;
+        # a truly clean, empty doc just gets a green-tick confirmation. Then
+        # pass the tool's status through.
         if [ -z "$files" ]; then
-          if [ "$IS_PR" = "true" ] && [ "$TIDY_RC" -eq 0 ]; then
-            { echo "## rust-llm-tidy: :white_check_mark: all tidy"; echo ""
-              echo "All files are tidy - no changes required."
-            } > "$RUNNER_TEMP/rlt-comment.md"
-            gh pr comment "$PR_NUMBER" --body-file "$RUNNER_TEMP/rlt-comment.md" \
-              || echo "::warning::rust-llm-tidy: could not post success comment" >&2
+          if [ "$IS_PR" = "true" ]; then
+            if [ -f "$RUNNER_TEMP/rlt-run.json" ]; then
+              table="$(
+                python3 "${{ github.action_path }}/scripts/json_table.py" \
+                  "$RUNNER_TEMP/rlt-run.json"
+              )"
+            fi
+            if [ -n "${table:-}" ]; then
+              # Dry-run change reports exit 0; lint-only failures exit non-zero.
+              if [ "$TIDY_RC" -eq 0 ]; then
+                heading="## rust-llm-tidy: changes"
+              else
+                heading="## rust-llm-tidy: not tidy"
+              fi
+              { echo "$heading"; echo ""
+                printf '%s\n' "$table"
+              } > "$RUNNER_TEMP/rlt-comment.md"
+              gh pr comment "$PR_NUMBER" --body-file "$RUNNER_TEMP/rlt-comment.md" \
+                || echo "::warning::rust-llm-tidy: could not post report comment" >&2
+            elif [ "$TIDY_RC" -eq 0 ]; then
+              { echo "## rust-llm-tidy: :white_check_mark: all tidy"; echo ""
+                echo "All files are tidy - no changes required."
+              } > "$RUNNER_TEMP/rlt-comment.md"
+              gh pr comment "$PR_NUMBER" --body-file "$RUNNER_TEMP/rlt-comment.md" \
+                || echo "::warning::rust-llm-tidy: could not post success comment" >&2
+            fi
           fi
           exit "$TIDY_RC"
         fi
@@ -541,10 +567,11 @@ runs:
         # check + dirty: comment (PR) and fail. apply (non-PR): leave changes.
         if [ "$MODE" = "check" ] || [ "$IS_PR" = "true" ]; then
           if [ "$IS_PR" = "true" ]; then
-            # Table of changed files with lint reasons from the run's stdout
-            # JSON document (only emitted for real, non-dry-run runs) via the
-            # JSON-to-markdown converter. Fall back to a plain list when that
-            # yields nothing (e.g. no findings in JSON).
+            # Table of changed files with lint reasons (and any recorded
+            # changes) from the run's stdout JSON document via the
+            # JSON-to-markdown converter. Every run emits JSON (real and
+            # dry-run), so the doc can carry lint findings and/or a "Changes"
+            # block. Fall back to a plain list when that yields nothing.
             if [ -f "$RUNNER_TEMP/rlt-run.json" ]; then
               table="$(
                 python3 "${{ github.action_path }}/scripts/json_table.py" \
