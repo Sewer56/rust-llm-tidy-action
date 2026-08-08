@@ -478,7 +478,19 @@ runs:
 
         # Files this run changed (the fixes), if any.
         files="$( { git diff --name-only HEAD || true; git ls-files --others --exclude-standard; } | sort -u )"
-        [ -z "$files" ] && exit "$TIDY_RC"   # already tidy (or tool error with no edits): pass its status
+
+        # Already tidy (or tool error with no edits): confirm success on PRs
+        # with a green-tick comment, then pass the tool's status through.
+        if [ -z "$files" ]; then
+          if [ "$IS_PR" = "true" ] && [ "$TIDY_RC" -eq 0 ]; then
+            { echo "## rust-llm-tidy: :white_check_mark: all tidy"; echo ""
+              echo "All files are tidy - no changes required."
+            } > "$RUNNER_TEMP/rlt-comment.md"
+            gh pr comment "$PR_NUMBER" --body-file "$RUNNER_TEMP/rlt-comment.md" \
+              || echo "::warning::rust-llm-tidy: could not post success comment" >&2
+          fi
+          exit "$TIDY_RC"
+        fi
 
         printf '%s\n' "$files" > "$RUNNER_TEMP/rlt-fixed-files"
         list="$(printf '%s\n' "$files" | sed 's#^#  - \`#; s#$#\`#')"
@@ -495,7 +507,7 @@ runs:
 
           # Plain GITHUB_TOKEN can't write a fork's PR branch, so push fails.
           if git push origin "HEAD:refs/heads/$HEAD_REF"; then
-            { echo "## rust-llm-tidy: fixes applied"; echo ""
+            { echo "## rust-llm-tidy: :white_check_mark: fixes applied"; echo ""
               echo "I tidied the files below and pushed commit \`$SHA\`."; echo ""
               echo "Changed files:"
               printf '%s\n' "$list"
