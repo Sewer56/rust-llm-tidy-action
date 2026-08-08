@@ -473,11 +473,11 @@ runs:
           done < "$RUNNER_TEMP/rlt-args"
         fi
 
-        # Keep a copy of the run's stdout and stderr so the PR comment can show
-        # why each file failed (the JSON document and any messages). tee
-        # preserves the console output. The tool exits non-zero when lints
-        # remain, so capture (not die); wait reaps/tees so rlt-run.{json,err}
-        # are complete before they are read below.
+        # Keep a copy of the run's stdout so the PR comment can show why each
+        # file failed (the JSON document). tee preserves console output. stderr
+        # is also tee'd to a file as a debugging aid. The tool exits non-zero
+        # when lints remain, so capture (not die); wait reaps/tees so
+        # rlt-run.json is complete before it is read below.
         "$RLT_BIN" "${args[@]}" > >(tee "$RUNNER_TEMP/rlt-run.json") 2> >(tee "$RUNNER_TEMP/rlt-run.err" >&2) || TIDY_RC=$?
         TIDY_RC="${TIDY_RC:-0}"
         wait || true    # flush tee; propagate failures nowhere
