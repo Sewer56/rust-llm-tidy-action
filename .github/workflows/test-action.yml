@@ -1,0 +1,438 @@
+name: Test rust-llm-tidy Action
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - "action.yml"
+      - "scripts/**"
+      - ".github/workflows/test-action.yml"
+  push:
+    branches: [main]
+    paths:
+      - "action.yml"
+      - "scripts/**"
+      - ".github/workflows/test-action.yml"
+
+jobs:
+  test-prebuilt-mode:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+          - os: windows-latest
+          - os: macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout Action Repository
+        uses: actions/checkout@v7
+
+      - name: Create standalone git repo fixture with untidy baseline
+        shell: bash
+        run: |
+          mkdir -p fixture/src
+          cat > fixture/src/main.rs <<'EOF'
+          fn b() { a(); }
+          fn a() {}
+
+          pub fn hello() {}
+          EOF
+          git init -q fixture
+          git -C fixture config user.email ci@test
+          git -C fixture config user.name ci
+          git -C fixture add -A
+          git -C fixture commit -qm "untidy baseline"
+
+      - name: Run action (prebuilt, apply)
+        id: tidy
+        uses: ./
+        with:
+          rust-project-path: fixture
+          paths: |
+            src/main.rs
+          include: "reorder"
+          no-config: "true"
+          sevenzip-source: "fetch"   # force standalone 7-Zip download path
+          release-repo: Sewer56/rust-llm-tidy
+          release-tag: 0.1.0
+
+      - name: Assert applied + reordered
+        shell: bash
+        run: |
+          test "${{ steps.tidy.outputs.binary-path }}" != ""
+          test -n "${{ steps.tidy.outputs.sevenzip-binary }}"
+          grep -q "fn a()" fixture/src/main.rs
+          # reorder places caller b() before callee a()
+          a=$(grep -n "fn a()" fixture/src/main.rs | cut -d: -f1)
+          b=$(grep -n "fn b()" fixture/src/main.rs | cut -d: -f1)
+          test "$b" -lt "$a"
+
+      - name: Commit applied result
+        shell: bash
+        run: |
+          git -C fixture add -A
+          git -C fixture commit -qm "applied tidy"
+
+      - name: Run action again (prebuilt, check mode must pass)
+        uses: ./
+        with:
+          rust-project-path: fixture
+          paths: |
+            src/main.rs
+          include: "reorder"
+          no-config: "true"
+          mode: "check"
+          release-repo: Sewer56/rust-llm-tidy
+          release-tag: 0.1.0
+
+      - name: Reintroduce untidy edit
+        shell: bash
+        run: printf 'fn b() { a(); }\nfn a() {}\n' > fixture/src/main.rs
+
+      - name: Check mode must fail on untidy
+        id: dirty
+        continue-on-error: true
+        uses: ./
+        with:
+          rust-project-path: fixture
+          paths: |
+            src/main.rs
+          include: "reorder"
+          no-config: "true"
+          mode: "check"
+          release-repo: Sewer56/rust-llm-tidy
+          release-tag: 0.1.0
+
+      - name: Assert recheck failed on untidy
+        shell: bash
+        run: test "${{ steps.dirty.outcome }}" = "failure"
+
+  test-git-mode:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Action Repository
+        uses: actions/checkout@v7
+
+      - name: Run action (git mode, build from source checkout)
+        id: tidy
+        uses: ./
+        with:
+          binary-source: "git"
+          use-source-checkout: "true"
+          source-repo: "Sewer56/rust-llm-tidy"
+          source-repo-ref: "main"
+          rust-project-path: ${{ github.workspace }}
+          include: "reorder"
+          no-config: "true"
+          dry-run: "true"
+
+      - name: Assert built binary works
+        shell: bash
+        run: |
+          BIN="${{ steps.tidy.outputs.binary-path }}"
+          test -n "$BIN"
+          test -x "$BIN"
+          "$BIN" --help | grep -q "dry-run"
+
+      - name: Assert source checkout and no target/ cleaned up from workspace
+        shell: bash
+        run: |
+          test ! -d "${{ github.workspace }}/.rlt-source"
+          test ! -d "${{ github.workspace }}/target"
+
+  test-check-mode-fails-on-dirty:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Action Repository
+        uses: actions/checkout@v7
+
+      - name: Create clean baseline repo, then untidy edit
+        shell: bash
+        run: |
+          mkdir -p fixture
+          # committed baseline = tidy
+          printf 'fn main() { init(); }\nfn init() {}\n' > fixture/lib.rs
+          git init -q fixture
+          git -C fixture config user.email ci@test
+          git -C fixture config user.name ci
+          git -C fixture add lib.rs
+          git -C fixture commit -qm baseline
+          # working-tree edit = untidy (caller before callee is wrong order)
+          printf 'fn b() { a(); }\nfn a() {}\n' > fixture/lib.rs
+
+      - name: Run action in check mode (must fail on dirty tree)
+        id: dirty
+        continue-on-error: true
+        uses: ./
+        with:
+          rust-project-path: fixture
+          paths: |
+            lib.rs
+          include: "reorder"
+          no-config: "true"
+          mode: "check"
+
+      - name: Assert check mode failed
+        shell: bash
+        run: test "${{ steps.dirty.outcome }}" = "failure"
+
+      - name: Apply mode declares tree tidy and check passes after
+        uses: ./
+        with:
+          rust-project-path: fixture
+          paths: |
+            lib.rs
+          include: "reorder"
+          no-config: "true"
+          mode: "apply"
+
+      - name: Commit applied result
+        shell: bash
+        run: |
+          git -C fixture add -A
+          git -C fixture commit -qm "applied tidy"
+
+      - name: Re-run check mode after apply (must pass)
+        uses: ./
+        with:
+          rust-project-path: fixture
+          paths: |
+            lib.rs
+          include: "reorder"
+          no-config: "true"
+          mode: "check"
+
+  test-changed-files:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Action Repository
+        uses: actions/checkout@v7
+
+      - name: Create clean baseline repo, then untidy edit (only this file changed)
+        shell: bash
+        run: |
+          mkdir -p fixture
+          # committed baseline = tidy for two files; then untidy ONE
+          printf 'fn main() { init(); }\nfn init() {}\n' > fixture/lib.rs
+          printf 'fn other() {}\n' > fixture/other.rs
+          git init -q fixture
+          git -C fixture config user.email ci@test
+          git -C fixture config user.name ci
+          git -C fixture add -A
+          git -C fixture commit -qm baseline
+          # untidy working-tree edit (caller before callee is wrong order)
+          printf 'fn b() { a(); }\nfn a() {}\n' > fixture/lib.rs
+
+      - name: Run action (changed-files, must tidy only lib.rs and fail check)
+        id: dirty
+        continue-on-error: true
+        uses: ./
+        with:
+          rust-project-path: fixture
+          changed-files: "true"
+          include: "reorder"
+          no-config: "true"
+          mode: "check"
+
+      - name: Assert check failed (untidy changed file detected)
+        shell: bash
+        run: test "${{ steps.dirty.outcome }}" = "failure"
+
+      - name: Assert only the changed file was processed (other.rs untouched)
+        shell: bash
+        run: |
+          grep -q "fn other() {}" fixture/other.rs
+          grep -q "fn a() {}" fixture/lib.rs
+
+  test-apply-push-comment:
+    runs-on: ubuntu-latest
+    # Exercises the apply/check post-processing logic (commit + push + PR
+    # comment + fail) which needs a PR event context a normal job does not
+    # have. Runs the action's real "Run rust-llm-tidy" script (extracted from
+    # action.yml) against a real local git remote, with a stub `gh`.
+    steps:
+      - name: Checkout Action Repository
+        uses: actions/checkout@v7
+
+      - name: Set up stub gh and tidy tool
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          cat > "$RUNNER_TEMP/bin/gh" <<'SH'
+          #!/usr/bin/env bash
+          f="$(echo "$@" | sed -n 's/.*--body-file \([^ ]*\).*/\1/p')"
+          echo "===== GH COMMENT ====="
+          cat "$f"
+          echo "===== END ====="
+          SH
+          # The "tidy" tool: rewrites lib.rs to the tidy form (reorder) and
+          # emits a lint diagnostic on stderr like the real CLI. RLT_STUB_RC
+          # simulates the real CLI exiting non-zero when lints remain.
+          cat > "$RUNNER_TEMP/bin/tidy" <<'SH'
+          #!/usr/bin/env bash
+          printf 'fn main() { init(); }\nfn init() {}\n' > lib.rs
+          echo 'lib.rs:1: error[DOC001]: non-private item is missing a doc comment (fn `hello`)' >&2
+          exit "${RLT_STUB_RC:-0}"
+          SH
+          chmod +x "$RUNNER_TEMP/bin/gh" "$RUNNER_TEMP/bin/tidy"
+
+      - name: Extract run script + create fixture repo
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import yaml
+          d = yaml.safe_load(open('action.yml'))
+          for s in d['runs']['steps']:
+              if s.get('id') == 'tidy':
+                  open('run.sh', 'w').write(s['run'])
+          PY
+          sed 's/^        //' run.sh > "$RUNNER_TEMP/run_dedent.sh"
+
+          git init -q --bare "$RUNNER_TEMP/origin"
+          git init -q "$RUNNER_TEMP/repo"
+          git -C "$RUNNER_TEMP/repo" config user.email ci@test
+          git -C "$RUNNER_TEMP/repo" config user.name ci
+          git -C "$RUNNER_TEMP/repo" remote add origin "$RUNNER_TEMP/origin"
+          # Tidy baseline commit; every step resets here so its untidy edit
+          # always differs from HEAD (git commit always succeeds).
+          printf 'fn main() { init(); }\nfn init() {}\n' > "$RUNNER_TEMP/repo/lib.rs"
+          git -C "$RUNNER_TEMP/repo" add -A
+          git -C "$RUNNER_TEMP/repo" commit -qm tidy-base
+          git -C "$RUNNER_TEMP/repo" tag tidy-base
+
+      - name: apply + PR, push succeeds (expect commit + success comment + exit 0)
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP/repo"
+          printf 'fn b() { a(); }\nfn a() {}\n' > lib.rs
+          git add -A; git commit -qm untidy
+          git push -q origin HEAD:refs/heads/feature
+
+          export PATH="$RUNNER_TEMP/bin:$PATH"
+          export MODE=apply IS_PR=true PR_NUMBER=7 HEAD_REF=feature
+          export COMMIT_NAME=bot COMMIT_EMAIL=b@b GITHUB_TOKEN=x RLT_BIN="$RUNNER_TEMP/bin/tidy"
+          bash "$RUNNER_TEMP/run_dedent.sh"
+          rc=$?
+          echo "exit=$rc (expect 0)"
+          test "$rc" = 0
+          grep -q "fixes applied" "$RUNNER_TEMP/rlt-comment.md"
+          grep -q '`lib.rs`' "$RUNNER_TEMP/rlt-comment.md"
+          git fetch -q origin && git -C . rev-parse --verify origin/feature >/dev/null
+
+      - name: apply + PR, push fails (expect failure comment + exit 1)
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP/repo"
+          printf 'fn b() { a(); }\nfn a() {}\n' > lib.rs
+          git add -A; git commit -qm untidy2
+          # stub git: reject the push. Resolve real git so the stub can exec it.
+          REAL_GIT="$(readlink -f "$(command -v git)")"
+          cat > "$RUNNER_TEMP/bin/git" <<SH
+          #!/usr/bin/env bash
+          if [ "\$1" = "push" ] && [ "\$RLT_PUSH_FAIL" = "1" ]; then
+            echo "error: RPC failed" >&2; exit 1
+          fi
+          exec $REAL_GIT "\$@"
+          SH
+          chmod +x "$RUNNER_TEMP/bin/git"
+
+          export PATH="$RUNNER_TEMP/bin:$PATH"
+          export MODE=apply IS_PR=true PR_NUMBER=7 HEAD_REF=feature
+          export COMMIT_NAME=bot COMMIT_EMAIL=b@b GITHUB_TOKEN=x
+          export RLT_BIN="$RUNNER_TEMP/bin/tidy" RLT_PUSH_FAIL=1
+          bash "$RUNNER_TEMP/run_dedent.sh" && { echo "should have failed"; exit 1; } || true
+          grep -q "could not push fixes" "$RUNNER_TEMP/rlt-comment.md"
+          grep -q '`lib.rs`' "$RUNNER_TEMP/rlt-comment.md"
+          unset RLT_PUSH_FAIL
+
+      - name: check + dirty PR (expect fail comment with reasons table + exit 1, no commit)
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP/repo"
+          git reset -q --hard tidy-base && git clean -qfd
+          printf 'fn b() { a(); }\nfn a() {}\n' > lib.rs
+          git add -A; git commit -qm untidy3
+
+          export PATH="$RUNNER_TEMP/bin:$PATH"
+          export MODE=check IS_PR=true PR_NUMBER=7 HEAD_REF=feature
+          export COMMIT_NAME=bot COMMIT_EMAIL=b@b GITHUB_TOKEN=x RLT_BIN="$RUNNER_TEMP/bin/tidy"
+          export RLT_STUB_RC=1
+          bash "$RUNNER_TEMP/run_dedent.sh" && { echo "should have failed"; exit 1; } || true
+          grep -q "not tidy" "$RUNNER_TEMP/rlt-comment.md"
+          # table rendered from the stub's stderr reason
+          grep -q '| File | Line | Code | Reason |' "$RUNNER_TEMP/rlt-comment.md"
+          grep -q 'DOC001' "$RUNNER_TEMP/rlt-comment.md"
+          grep -q 'non-private item is missing a doc comment' "$RUNNER_TEMP/rlt-comment.md"
+          # check mode must NOT commit
+          test "$(git rev-parse HEAD)" = "$(git rev-parse HEAD~0)"
+
+      - name: apply non-PR (expect mutate + leave changes, exit 0, no comment)
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP/repo"
+          git reset -q --hard tidy-base && git clean -qfd
+          printf 'fn b() { a(); }\nfn a() {}\n' > lib.rs
+          git add -A; git commit -qm untidy4
+
+          rm -f "$RUNNER_TEMP/rlt-comment.md"
+          export PATH="$RUNNER_TEMP/bin:$PATH"
+          export MODE=apply IS_PR=false PR_NUMBER=7 HEAD_REF=feature
+          export COMMIT_NAME=bot COMMIT_EMAIL=b@b GITHUB_TOKEN=x RLT_BIN="$RUNNER_TEMP/bin/tidy"
+          bash "$RUNNER_TEMP/run_dedent.sh"
+          echo "exit=$? (expect 0)"
+          grep -q "fn init()" lib.rs      # mutated
+          test ! -f "$RUNNER_TEMP/rlt-comment.md"   # no comment written
+
+      - name: already tidy (expect exit 0, no comment)
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP/repo"
+          git reset -q --hard tidy-base && git clean -qfd   # tree already tidy
+
+          rm -f "$RUNNER_TEMP/rlt-comment.md"
+          export PATH="$RUNNER_TEMP/bin:$PATH"
+          export MODE=apply IS_PR=true PR_NUMBER=7 HEAD_REF=feature
+          export COMMIT_NAME=bot COMMIT_EMAIL=b@b GITHUB_TOKEN=x RLT_BIN="$RUNNER_TEMP/bin/tidy"
+          bash "$RUNNER_TEMP/run_dedent.sh"
+          echo "exit=$? (expect 0)"
+          test ! -f "$RUNNER_TEMP/rlt-comment.md"
+
+  test-skipping-prebuilt-7z-install-apt:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Action Repository
+        uses: actions/checkout@v7
+
+      - name: Create fixture
+        shell: bash
+        run: |
+          mkdir -p fixture
+          printf 'fn b() { a(); }\nfn a() {}\n' > fixture/lib.rs
+
+      - name: Install p7zip
+        shell: bash
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y p7zip-full
+
+      - name: Run action (prebuilt, apt 7z)
+        id: tidy
+        uses: ./
+        with:
+          rust-project-path: fixture
+          paths: |
+            lib.rs
+          include: "reorder"
+          no-config: "true"
+          sevenzip-source: "apt"
+          release-repo: Sewer56/rust-llm-tidy
+          release-tag: 0.1.0
+
+      - name: Assert apply worked
+        shell: bash
+        run: |
+          a=$(grep -n "fn a()" fixture/lib.rs | cut -d: -f1)
+          b=$(grep -n "fn b()" fixture/lib.rs | cut -d: -f1)
+          test "$b" -lt "$a"

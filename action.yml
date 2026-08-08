@@ -1,0 +1,555 @@
+name: "rust-llm-tidy"
+description: "Runs rust-llm-tidy (fix, reorder, narrow visibility, lint) on Rust and Markdown files. Binary comes from prebuilt release artifacts, from source, or from PATH."
+branding:
+  icon: "book-open"
+  color: "blue"
+
+inputs:
+  # ── Binary acquisition ─────────────────────────────────────
+  binary-source:
+    description: >-
+      Where to get the rust-llm-tidy binary. 'prebuilt' downloads a release
+      artifact, 'git' builds from a source checkout, 'none' uses a
+      pre-installed `rust-llm-tidy` found on PATH.
+    required: false
+    default: "prebuilt"
+
+  # Prebuilt mode
+  release-repo:
+    description: "GitHub repo (owner/name) hosting the prebuilt release artifacts"
+    required: false
+    default: "Sewer56/rust-llm-tidy"
+  release-tag:
+    description: "Release tag to download. Empty uses the latest release."
+    required: false
+    default: ""
+  download-asset:
+    description: >-
+      Exact release asset name to download. Overrides automatic target
+      detection (useful for testing).
+    required: false
+    default: ""
+  install-dir:
+    description: >-
+      Directory to install the downloaded binary into. Relative paths are
+      resolved against $RUNNER_TEMP.
+    required: false
+    default: "rust-llm-tidy-bin"
+  cache-prebuilt:
+    description: "Whether to cache the downloaded binary across runs"
+    required: false
+    default: "false"
+
+  # 7-Zip extraction
+  sevenzip-source:
+    description: |-
+      Where the native 7-Zip used to extract release artifacts comes from.
+
+      Options:
+
+        auto (default)
+            Use a 7z/7zz binary already on the runner
+            (includes Windows Program Files\7-Zip and
+            macOS libarchive tar). If none found, download
+            a standalone 7-Zip from GitHub.
+
+        fetch
+            Always download a standalone 7-Zip from GitHub
+            (ip7z/7zip releases).
+
+        version:<x.y>
+            Download a specific 7-Zip version.
+            Example: version:26.02
+
+        apt
+            Linux only. Require p7zip-full pre-installed
+            via apt. No download.
+
+        preinstalled
+            Require 7z or 7zz binary already present on
+            the runner. No download.
+    required: false
+    default: "auto"
+  cache-sevenzip:
+    description: "Whether to cache a downloaded standalone 7-Zip across runs"
+    required: false
+    default: "false"
+
+  # Git-build mode
+  source-path:
+    description: >-
+      Path to a rust-llm-tidy source checkout (manifest expected at
+      <path>/src/Cargo.toml). Defaults to the current repository checkout
+      (github.workspace); in the vendored submodule layout that is the
+      enclosing rust-llm-tidy repo itself, so 'git' mode builds from
+      your own current source. Set explicitly for non-rust-llm-tidy repos.
+    required: false
+    default: "${{ github.workspace }}"
+  use-source-checkout:
+    description: "Whether to checkout source-repo@source-repo-ref into the workspace for building. Overrides source-path."
+    required: false
+    default: "false"
+  source-repo:
+    description: "GitHub repo (owner/name) of rust-llm-tidy source when use-source-checkout is true"
+    required: false
+    default: "Sewer56/rust-llm-tidy"
+  source-repo-ref:
+    description: "Branch, tag or SHA of source-repo to checkout. Pin to a SHA for reproducible builds."
+    required: false
+    default: "main"
+  install-rust-toolchain:
+    description: "Whether to install the Rust toolchain used to build from source"
+    required: false
+    default: "true"
+  rust-toolchain:
+    description: "Rust toolchain used to build from source"
+    required: false
+    default: "stable"
+  setup-rust-cache:
+    description: "Whether to restore/save a rust cache for the git build"
+    required: false
+    default: "true"
+
+  # ── Tidy invocation ────────────────────────────────────────
+  rust-project-path:
+    description: "Working directory used to run rust-llm-tidy (and the git diff check)"
+    required: false
+    default: "${{ github.workspace }}"
+  paths:
+    description: >-
+      Paths to tidy, one per line. Each directory is expanded recursively;
+      only .rs/.md files are processed. Empty behaves per `changed-files`:
+      either the PR's changed files (when true) or '.' - the whole
+      rust-project-path.
+    required: false
+    default: ""
+  changed-files:
+    description: >-
+      When true and `paths` is empty, tidy only the files changed by this
+      PR (vs its base branch). Ignored when `paths` is set. In non-PR
+      contexts falls back to the working-tree git diff.
+    required: false
+    default: "false"
+  mode:
+    description: >-
+      'apply' tidies files in place; on a pull request it also commits and
+      pushes the fixes to the PR branch, and if that push is impossible (fork
+      PR / read-only token) it posts a PR comment listing the fixed files and
+      fails. 'check' fails the job when files are not already tidy (mutation
+      is left in place for inspection). On failure a PR comment listing the
+      offending/fixed files is posted.
+    required: false
+    default: "apply"
+  config-path:
+    description: "Explicit path to a .rust-llm-tidy.yml config (--config)"
+    required: false
+    default: ""
+  no-config:
+    description: "Disable config discovery entirely (--no-config)"
+    required: false
+    default: "false"
+  include:
+    description: "Comma- or space-separated ops/lint-codes to run (--include). Example: 'reorder,vis'"
+    required: false
+    default: ""
+  exclude:
+    description: "Comma- or space-separated ops/lint-codes to skip (--exclude). Example: 'lints'"
+    required: false
+    default: ""
+  dry-run:
+    description: "Print results to stdout instead of modifying files"
+    required: false
+    default: "false"
+  validate:
+    description: "Validate the config and exit; do not process files"
+    required: false
+    default: "false"
+
+outputs:
+  binary-path:
+    description: "Path to the rust-llm-tidy binary that was used"
+    value: ${{ steps.binary.outputs.path }}
+  source-dir:
+    description: "Resolved rust-llm-tidy source directory (git mode only)"
+    value: ${{ steps.source.outputs.source_dir }}
+  sevenzip-binary:
+    description: "Path to the 7-Zip binary used for extraction"
+    value: ${{ steps.sevenzip.outputs.sevenzip_binary || steps.sevenzip-env.outputs.sevenzip_binary }}
+
+runs:
+  using: "composite"
+  steps:
+    # ── Source resolution (git mode) ─────────────────────────
+    - name: Checkout rust-llm-tidy source
+      if: >-
+        inputs.binary-source == 'git' &&
+        inputs.use-source-checkout == 'true'
+      uses: actions/checkout@v7
+      with:
+        repository: ${{ inputs.source-repo }}
+        ref: ${{ inputs.source-repo-ref }}
+        path: ${{ github.workspace }}/.rlt-source
+
+    - name: Resolve source directory
+      id: source
+      shell: bash
+      env:
+        RLT_SOURCE_PATH: ${{ inputs.source-path }}
+      run: |
+        if [ "${{ inputs.use-source-checkout }}" = "true" ]; then
+          echo "source_dir=${{ github.workspace }}/.rlt-source" >> "$GITHUB_OUTPUT"
+        else
+          printf 'source_dir=%s\n' "$RLT_SOURCE_PATH" >> "$GITHUB_OUTPUT"
+        fi
+
+    # ── Prebuilt binary (prebuilt mode) ──────────────────────
+    # Ensure a native 7-Zip CLI exists before extracting release artifacts.
+    # resolve_artifact.py receives it via SEVENZIP_BINARY.
+    - name: Ensure 7-Zip
+      if: inputs.binary-source == 'prebuilt' && inputs.sevenzip-source != 'preinstalled'
+      id: sevenzip
+      shell: bash
+      run: python3 "${{ github.action_path }}/scripts/ensure_7z.py"
+      env:
+        INPUT_SEVENZIP_SOURCE: ${{ inputs.sevenzip-source }}
+        RUNNER_OS: ${{ runner.os }}
+        RUNNER_ARCH: ${{ runner.arch }}
+        RUNNER_TEMP: ${{ runner.temp }}
+        GITHUB_TOKEN: ${{ github.token }}
+
+    - name: Cache 7-Zip
+      if: >-
+        inputs.binary-source == 'prebuilt' &&
+        inputs.cache-sevenzip == 'true'
+      uses: actions/cache@v6
+      with:
+        path: ${{ runner.temp }}/sevenzip-bin
+        key: sevenzip-bin-${{ inputs.sevenzip-source }}
+
+    - name: Cache 7-Zip source archive
+      if: >-
+        inputs.binary-source == 'prebuilt' &&
+        inputs.cache-sevenzip == 'true'
+      uses: actions/cache@v6
+      with:
+        path: ${{ runner.temp }}/sevenzip-bin-src
+        key: sevenzip-src-${{ inputs.sevenzip-source }}
+
+    - name: Detect environment 7-Zip
+      if: >-
+        inputs.binary-source == 'prebuilt' &&
+        inputs.sevenzip-source == 'preinstalled'
+      id: sevenzip-env
+      shell: bash
+      run: python3 "${{ github.action_path }}/scripts/ensure_7z.py"
+      env:
+        INPUT_SEVENZIP_SOURCE: ${{ inputs.sevenzip-source }}
+        RUNNER_OS: ${{ runner.os }}
+        RUNNER_ARCH: ${{ runner.arch }}
+        RUNNER_TEMP: ${{ runner.temp }}
+        GITHUB_TOKEN: ${{ github.token }}
+
+    - name: Install rust-llm-tidy from release artifact
+      if: inputs.binary-source == 'prebuilt'
+      id: prebuilt
+      shell: bash
+      run: python3 "${{ github.action_path }}/scripts/resolve_artifact.py"
+      env:
+        INPUT_RELEASE_REPO: ${{ inputs.release-repo }}
+        INPUT_RELEASE_TAG: ${{ inputs.release-tag }}
+        INPUT_DOWNLOAD_ASSET: ${{ inputs.download-asset }}
+        INPUT_INSTALL_DIR: ${{ inputs.install-dir }}
+        SEVENZIP_BINARY: ${{ steps.sevenzip.outputs.sevenzip_binary || steps.sevenzip-env.outputs.sevenzip_binary }}
+        RUNNER_OS: ${{ runner.os }}
+        RUNNER_ARCH: ${{ runner.arch }}
+        RUNNER_TEMP: ${{ runner.temp }}
+        GITHUB_TOKEN: ${{ github.token }}
+
+    - name: Cache prebuilt binary
+      if: >-
+        inputs.binary-source == 'prebuilt' &&
+        inputs.cache-prebuilt == 'true'
+      uses: actions/cache@v6
+      with:
+        path: ${{ runner.temp }}/rust-llm-tidy-bin
+        key: >-
+          ${{ inputs.release-repo }}-${{ inputs.release-tag }}-
+          ${{ steps.prebuilt.outputs.asset_name }}
+
+    # ── Build from source (git mode) ─────────────────────────
+    - name: Install Rust toolchain
+      if: >-
+        inputs.binary-source == 'git' &&
+        inputs.install-rust-toolchain == 'true'
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        toolchain: ${{ inputs.rust-toolchain }}
+        cache: false
+
+    - name: Setup Rust cache for git build
+      if: >-
+        inputs.binary-source == 'git' &&
+        inputs.setup-rust-cache == 'true'
+      uses: Swatinem/rust-cache@v2
+      with:
+        cache-on-failure: true
+        cache-all-crates: true
+        # Builds go to $RUNNER_TEMP/rlt-target (never the workspace), so cache
+        # only the cargo home (registry/git/bin); skipping the workspace target
+        # keeps the current repo free of a restored target/ dir.
+        workspaces: ""
+
+    - name: Build rust-llm-tidy from source
+      if: inputs.binary-source == 'git'
+      id: build
+      shell: bash
+      env:
+        RLT_SOURCE_DIR: ${{ steps.source.outputs.source_dir }}
+        RLT_TARGET_DIR: ${{ runner.temp }}/rlt-target
+        RLT_USE_SOURCE_CHECKOUT: ${{ inputs.use-source-checkout }}
+        RLT_SOURCE_CHECKOUT_DIR: ${{ github.workspace }}/.rlt-source
+      run: |
+        set -euo pipefail
+        if [ ! -f "$RLT_SOURCE_DIR/src/Cargo.toml" ]; then
+          echo "::error::source-path $RLT_SOURCE_DIR has no src/Cargo.toml; point source-path at a rust-llm-tidy checkout or set use-source-checkout: true" >&2
+          exit 1
+        fi
+        # Build into a temp target dir so no artifacts (binaries) are left
+        # inside the source checkout / current repository.
+        cargo build --release \
+          --manifest-path "$RLT_SOURCE_DIR/src/Cargo.toml" \
+          --target-dir "$RLT_TARGET_DIR" \
+          -p rust-llm-tidy-cli --bin rust-llm-tidy
+        BIN="$RLT_TARGET_DIR/release/rust-llm-tidy"
+        if [ ! -x "$BIN" ] && [ -x "$BIN.exe" ]; then
+          BIN="$BIN.exe"
+        fi
+        echo "binary_path=$BIN" >> "$GITHUB_OUTPUT"
+
+        # If the action itself checked out the source (use-source-checkout),
+        # remove that checkout so nothing extra is left in the workspace.
+        if [ "$RLT_USE_SOURCE_CHECKOUT" = "true" ] && \
+           [ "$RLT_SOURCE_DIR" = "$RLT_SOURCE_CHECKOUT_DIR" ]; then
+          rm -rf -- "$RLT_SOURCE_CHECKOUT_DIR"
+        fi
+
+    # ── Final binary path ────────────────────────────────────
+    - name: Resolve final binary path
+      id: binary
+      shell: bash
+      env:
+        RLT_PREBUILT_PATH: ${{ steps.prebuilt.outputs.binary_path }}
+        RLT_BUILD_PATH: ${{ steps.build.outputs.binary_path }}
+      run: |
+        if [ "${{ inputs.binary-source }}" = "prebuilt" ]; then
+          printf 'path=%s\n' "$RLT_PREBUILT_PATH" >> "$GITHUB_OUTPUT"
+        elif [ "${{ inputs.binary-source }}" = "git" ]; then
+          printf 'path=%s\n' "$RLT_BUILD_PATH" >> "$GITHUB_OUTPUT"
+        else
+          printf 'path=rust-llm-tidy\n' >> "$GITHUB_OUTPUT"
+        fi
+
+    # ── Tidy arguments ───────────────────────────────────────
+    - name: Build rust-llm-tidy arguments
+      id: args
+      shell: bash
+      working-directory: ${{ inputs.rust-project-path }}
+      env:
+        RLT_CONFIG_PATH: ${{ inputs.config-path }}
+        RLT_INCLUDE: ${{ inputs.include }}
+        RLT_EXCLUDE: ${{ inputs.exclude }}
+        RLT_PATH_LIST: ${{ inputs.paths }}
+        RLT_DEFAULT_FILES: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}
+        RLT_CHANGED_FILES: ${{ inputs.changed-files }}
+      run: |
+        set -euo pipefail
+        args=()
+
+        if [ "${{ inputs.validate }}" = "true" ]; then
+          args+=(--validate)
+        else
+          if [ "${{ inputs.no-config }}" = "true" ]; then
+            args+=(--no-config)
+          elif [ -n "$RLT_CONFIG_PATH" ]; then
+            args+=(--config "$RLT_CONFIG_PATH")
+          fi
+
+          if [ "${{ inputs.dry-run }}" = "true" ]; then
+            args+=(--dry-run)
+          fi
+
+          if [ -n "$RLT_INCLUDE" ]; then
+            while IFS= read -r r; do
+              r="$(printf '%s' "$r" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+              [ -n "$r" ] && args+=(--include "$r")
+            done <<< "$(printf '%s' "$RLT_INCLUDE" | tr ',;' '\n')"
+          fi
+
+          if [ -n "$RLT_EXCLUDE" ]; then
+            while IFS= read -r r; do
+              r="$(printf '%s' "$r" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+              [ -n "$r" ] && args+=(--exclude "$r")
+            done <<< "$(printf '%s' "$RLT_EXCLUDE" | tr ',;' '\n')"
+          fi
+
+          paths=()
+          if [ -n "$RLT_PATH_LIST" ]; then
+            # Explicit paths win.
+            while IFS= read -r p; do
+              p="$(printf '%s' "$p" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+              [ -n "$p" ] && paths+=("$p")
+            done <<< "$RLT_PATH_LIST"
+          elif [ "$RLT_CHANGED_FILES" = "true" ]; then
+            # Tidy only the files changed by this PR (vs its base).
+            if [ -n "$RLT_DEFAULT_FILES" ]; then
+              base="$RLT_DEFAULT_FILES"
+              # Actions checkout is shallow (fetch-depth 1); fetch the base for
+              # a valid diff if it isn't already present.
+              if ! git rev-parse --verify --quiet "$base" >/dev/null 2>&1; then
+                if ! git fetch --depth=1 origin "$base" >/dev/null 2>&1; then
+                  echo "::error::changed-files: could not fetch PR base $base" >&2
+                  exit 1
+                fi
+              fi
+              mapfile -t changed < <(git diff --name-only --diff-filter=ACMR "$base"...HEAD)
+              paths=("${changed[@]}")
+            else
+              # Non-PR (push/workflow_dispatch): let the CLI use the
+              # working-tree git diff (no path args).
+              paths=()
+            fi
+          else
+            # Whole rust-project-path.
+            paths=(".")
+          fi
+
+          args+=("${paths[@]}")
+        fi
+
+        printf '%s\0' "${args[@]}" > "$RUNNER_TEMP/rlt-args"
+
+    # ── Run ──────────────────────────────────────────────────
+    # One block does everything: run tidy, then (if the tree changed) decide
+    # what to do by mode and event:
+    #
+    #   apply + PR          -> commit + push the fixes; if the push works post
+    #                          a success comment, else post a comment listing
+    #                          the fixed files and fail.
+    #   check + dirty       -> comment (PR) listing the offending files, fail.
+    #   apply (non-PR)      -> old behaviour: mutate, leave the changes in the
+    #                          working tree (no push, no comment, no fail).
+    #
+    # Comments are only possible on a pull request (no PR/issue otherwise).
+    - name: Run rust-llm-tidy
+      id: tidy
+      shell: bash
+      working-directory: ${{ inputs.rust-project-path }}
+      env:
+        RLT_BIN: ${{ steps.binary.outputs.path }}
+        MODE: ${{ inputs.mode }}
+        IS_PR: ${{ github.event_name == 'pull_request' }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        HEAD_REF: ${{ github.head_ref }}
+        COMMIT_NAME: github-actions[bot]
+        COMMIT_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+        GITHUB_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+
+        args=()
+        if [ -f "$RUNNER_TEMP/rlt-args" ]; then
+          while IFS= read -r -d '' a; do
+            args+=("$a")
+          done < "$RUNNER_TEMP/rlt-args"
+        fi
+
+        # Keep a copy of the run's stderr so the PR comment can show why each
+        # file failed (lint reasons). tee preserves the console output.
+        # The tool exits non-zero when lints remain, so capture (not die); wait
+        # reaps/tees so rlt-run.err is complete before it is read below.
+        "$RLT_BIN" "${args[@]}" 2> >(tee "$RUNNER_TEMP/rlt-run.err" >&2) || TIDY_RC=$?
+        TIDY_RC="${TIDY_RC:-0}"
+        wait || true    # flush tee; propagate failures nowhere
+
+        # Files this run changed (the fixes), if any.
+        files="$( { git diff --name-only HEAD || true; git ls-files --others --exclude-standard; } | sort -u )"
+        [ -z "$files" ] && exit "$TIDY_RC"   # already tidy (or tool error with no edits): pass its status
+
+        printf '%s\n' "$files" > "$RUNNER_TEMP/rlt-fixed-files"
+        list="$(printf '%s\n' "$files" | sed 's#^#  - \`#; s#$#\`#')"
+
+        # apply + PR: commit + push; comment success or fail-with-files.
+        if [ "$MODE" = "apply" ] && [ "$IS_PR" = "true" ]; then
+          mapfile -t arr <<< "$files"
+          git config user.name "$COMMIT_NAME"
+          git config user.email "$COMMIT_EMAIL"
+          git add -- "${arr[@]}"
+          git commit -m "Apply rust-llm-tidy fixes" \
+            -m "Automated by the rust-llm-tidy GitHub Action." >/dev/null
+          SHA="$(git rev-parse HEAD)"
+
+          # Plain GITHUB_TOKEN can't write a fork's PR branch, so push fails.
+          if git push origin "HEAD:refs/heads/$HEAD_REF"; then
+            { echo "## rust-llm-tidy: fixes applied"; echo ""
+              echo "I tidied the files below and pushed commit \`$SHA\`."; echo ""
+              echo "Changed files:"
+              printf '%s\n' "$list"
+            } > "$RUNNER_TEMP/rlt-comment.md"
+            gh pr comment "$PR_NUMBER" --body-file "$RUNNER_TEMP/rlt-comment.md" \
+              || echo "::warning::rust-llm-tidy: could not post success comment" >&2
+            exit 0
+          fi
+
+          { echo "## rust-llm-tidy: could not push fixes"; echo ""
+            echo "I tidied the files below but could not push the fix commit (fork PR or the"
+            echo "token lacks write access to the PR branch)."; echo ""
+            echo "Fixed files:"
+            printf '%s\n' "$list"; echo ""
+            echo "To get the fixes applied, re-run with a token that can write to the PR branch"
+            echo "(e.g. \`permissions: contents: write\`, or a PAT on fork PRs via"
+            echo "\`pull_request_target\`)."
+          } > "$RUNNER_TEMP/rlt-comment.md"
+          gh pr comment "$PR_NUMBER" --body-file "$RUNNER_TEMP/rlt-comment.md" \
+            || echo "::warning::rust-llm-tidy: could not post failure comment" >&2
+          echo "::error::rust-llm-tidy: apply tidied files but could not push" >&2
+          exit 1
+        fi
+
+        # check + dirty: comment (PR) and fail. apply (non-PR): leave changes.
+        if [ "$MODE" = "check" ] || [ "$IS_PR" = "true" ]; then
+          if [ "$IS_PR" = "true" ]; then
+            # Table of changed files with lint reasons from the run's stderr
+            # (format: <file>:<line>: error[CODE>: reason). Fall back to a
+            # plain list when there is no reason output.
+            reasons=""
+            if [ -f "$RUNNER_TEMP/rlt-run.err" ]; then
+              reasons="$(
+                sed -nE 's#^([^: ]+):([0-9]+): error\[([A-Z0-9]+)\]: (.*)$#\1|\2|\3|\4#p' \
+                  "$RUNNER_TEMP/rlt-run.err" | sort -u
+              )"
+            fi
+            if [ -n "$reasons" ]; then
+              { echo "## rust-llm-tidy: not tidy"; echo ""
+                echo "| File | Line | Code | Reason |"
+                echo "| ---- | ---- | ---- | ------ |"
+                printf '%s\n' "$reasons" | while IFS='|' read -r f l c r; do
+                  r="${r//|/&#124;}"             # pipes -> entity (cell separator)
+                  echo "| \`$f\` | $l | \`$c\` | $r |"
+                done
+              } > "$RUNNER_TEMP/rlt-comment.md"
+            else
+              { echo "## rust-llm-tidy: not tidy"; echo ""
+                echo "These files are not tidy:"; echo ""
+                printf '%s\n' "$list"
+              } > "$RUNNER_TEMP/rlt-comment.md"
+            fi
+            gh pr comment "$PR_NUMBER" --body-file "$RUNNER_TEMP/rlt-comment.md" \
+              || echo "::warning::rust-llm-tidy: could not post comment" >&2
+          fi
+          echo "::error::rust-llm-tidy: working tree is not tidy" >&2
+          printf '%s\n' "$files" >&2
+          exit 1
+        fi
+
+        # apply, non-PR: leave the fixes in the working tree.
+        exit "$TIDY_RC"
