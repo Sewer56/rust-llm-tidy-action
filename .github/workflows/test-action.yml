@@ -268,12 +268,13 @@ jobs:
           echo "===== END ====="
           SH
           # The "tidy" tool: rewrites lib.rs to the tidy form (reorder) and
-          # emits a lint diagnostic on stderr like the real CLI. RLT_STUB_RC
-          # simulates the real CLI exiting non-zero when lints remain.
+          # emits a lint finding on stdout as a JSON array, exactly like the
+          # real CLI's `--output-mode json`. RLT_STUB_RC simulates the real
+          # CLI exiting non-zero when lints remain.
           cat > "$RUNNER_TEMP/bin/tidy" <<'SH'
           #!/usr/bin/env bash
           printf 'fn main() { init(); }\nfn init() {}\n' > lib.rs
-          echo 'lib.rs:1: error[DOC001]: non-private item is missing a doc comment (fn `hello`)' >&2
+          printf '%s\n' '[{"path":"lib.rs","line":1,"severity":"error","code":"DOC001","message":"non-private item is missing a doc comment (fn `hello`)","item_kind":"fn","item_name":"hello"}]'
           exit "${RLT_STUB_RC:-0}"
           SH
           chmod +x "$RUNNER_TEMP/bin/gh" "$RUNNER_TEMP/bin/tidy"
@@ -361,8 +362,8 @@ jobs:
           export RLT_STUB_RC=1
           bash "$RUNNER_TEMP/run_dedent.sh" && { echo "should have failed"; exit 1; } || true
           grep -q "not tidy" "$RUNNER_TEMP/rlt-comment.md"
-          # table rendered from the stub's stderr reason
-          grep -q '| File | Line | Code | Reason |' "$RUNNER_TEMP/rlt-comment.md"
+          # table rendered from the JSON document with the Severity column
+          grep -q '| File | Line | Severity | Code | Reason |' "$RUNNER_TEMP/rlt-comment.md"
           grep -q 'DOC001' "$RUNNER_TEMP/rlt-comment.md"
           grep -q 'non-private item is missing a doc comment' "$RUNNER_TEMP/rlt-comment.md"
           # check mode must NOT commit

@@ -34,6 +34,27 @@ PRs, where a plain `GITHUB_TOKEN` cannot write the fork's branch) it posts a
 PR comment listing the fixed files and fails. On any failure a PR comment
 listing the offending/fixed files is posted.
 
+### JSON-only consumption
+
+The action invokes `rust-llm-tidy` with `--output-mode json` on every real run
+(never with `--dry-run` or `--validate`) and builds the PR "not tidy" table
+(`| File | Line | Severity | Code | Reason |`) solely from the parsed JSON
+document that the binary writes to stdout; the exit code remains the gating
+signal. There is no plaintext/sed fallback.
+
+This means the action requires a `rust-llm-tidy` binary that supports
+`--output-mode json`:
+
+- **`prebuilt`** - the `release-tag` must point at a release (or the latest
+  release must be) built from a version of `rust-llm-tidy` that includes JSON
+  output. Releases before that feature landed do **not** work.
+- **`git`** - `source-repo-ref`/`source-path` must resolve to a `rust-llm-tidy`
+  source checkout that includes JSON output.
+- **`none`** - the `rust-llm-tidy` on `PATH` must support `--output-mode json`.
+
+The action's JSON-consuming version and the CLI binary it uses must be updated
+in lockstep so the binary always understands the JSON the action requests.
+
 ## Usage
 
 Full example - vendored submodule, prebuilt binary, whole-repo apply on PRs:

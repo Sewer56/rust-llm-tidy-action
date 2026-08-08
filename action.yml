@@ -381,6 +381,11 @@ runs:
 
           if [ "${{ inputs.dry-run }}" = "true" ]; then
             args+=(--dry-run)
+          else
+            # The action consumes lint findings from JSON only. JSON conflicts
+            # with --dry-run (which reconstructs file contents on stdout), so
+            # it is added for every real run but never alongside --dry-run.
+            args+=(--output-mode json)
           fi
 
           if [ -n "$RLT_INCLUDE" ]; then
@@ -468,11 +473,12 @@ runs:
           done < "$RUNNER_TEMP/rlt-args"
         fi
 
-        # Keep a copy of the run's stderr so the PR comment can show why each
-        # file failed (lint reasons). tee preserves the console output.
-        # The tool exits non-zero when lints remain, so capture (not die); wait
-        # reaps/tees so rlt-run.err is complete before it is read below.
-        "$RLT_BIN" "${args[@]}" 2> >(tee "$RUNNER_TEMP/rlt-run.err" >&2) || TIDY_RC=$?
+        # Keep a copy of the run's stdout and stderr so the PR comment can show
+        # why each file failed (the JSON document and any messages). tee
+        # preserves the console output. The tool exits non-zero when lints
+        # remain, so capture (not die); wait reaps/tees so rlt-run.{json,err}
+        # are complete before they are read below.
+        "$RLT_BIN" "${args[@]}" > >(tee "$RUNNER_TEMP/rlt-run.json") 2> >(tee "$RUNNER_TEMP/rlt-run.err" >&2) || TIDY_RC=$?
         TIDY_RC="${TIDY_RC:-0}"
         wait || true    # flush tee; propagate failures nowhere
 
@@ -535,24 +541,19 @@ runs:
         # check + dirty: comment (PR) and fail. apply (non-PR): leave changes.
         if [ "$MODE" = "check" ] || [ "$IS_PR" = "true" ]; then
           if [ "$IS_PR" = "true" ]; then
-            # Table of changed files with lint reasons from the run's stderr
-            # (format: <file>:<line>: error[CODE>: reason). Fall back to a
-            # plain list when there is no reason output.
-            reasons=""
-            if [ -f "$RUNNER_TEMP/rlt-run.err" ]; then
-              reasons="$(
-                sed -nE 's#^([^: ]+):([0-9]+): error\[([A-Z0-9]+)\]: (.*)$#\1|\2|\3|\4#p' \
-                  "$RUNNER_TEMP/rlt-run.err" | sort -u
+            # Table of changed files with lint reasons from the run's stdout
+            # JSON document (only emitted for real, non-dry-run runs) via the
+            # JSON-to-markdown converter. Fall back to a plain list when that
+            # yields nothing (e.g. no findings in JSON).
+            if [ -f "$RUNNER_TEMP/rlt-run.json" ]; then
+              table="$(
+                python3 "${{ github.action_path }}/scripts/json_table.py" \
+                  "$RUNNER_TEMP/rlt-run.json"
               )"
             fi
-            if [ -n "$reasons" ]; then
+            if [ -n "${table:-}" ]; then
               { echo "## rust-llm-tidy: not tidy"; echo ""
-                echo "| File | Line | Code | Reason |"
-                echo "| ---- | ---- | ---- | ------ |"
-                printf '%s\n' "$reasons" | while IFS='|' read -r f l c r; do
-                  r="${r//|/&#124;}"             # pipes -> entity (cell separator)
-                  echo "| \`$f\` | $l | \`$c\` | $r |"
-                done
+                printf '%s\n' "$table"
               } > "$RUNNER_TEMP/rlt-comment.md"
             else
               { echo "## rust-llm-tidy: not tidy"; echo ""
