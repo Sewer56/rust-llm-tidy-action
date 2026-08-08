@@ -294,10 +294,15 @@ runs:
       with:
         cache-on-failure: true
         cache-all-crates: true
-        # Builds go to $RUNNER_TEMP/rlt-target (never the workspace), so cache
-        # only the cargo home (registry/git/bin); skipping the workspace target
-        # keeps the current repo free of a restored target/ dir.
-        workspaces: ""
+        # The rust-llm-tidy source checkout keeps its workspace manifest at
+        # <source>/src; point rust-cache there so its `cargo metadata` probe
+        # resolves instead of failing against the repository root.
+        workspaces: "${{ steps.source.outputs.source_dir }}/src -> target"
+        # Builds go to $RUNNER_TEMP/rlt-target (never the workspace), so the
+        # workspace target under `src/` stays empty; cache the real build dir
+        # explicitly so later runs rebuild from a warm target instead of
+        # compiling the workspace from scratch.
+        cache-directories: "${{ runner.temp }}/rlt-target"
 
     - name: Build rust-llm-tidy from source
       if: inputs.binary-source == 'git'

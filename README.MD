@@ -36,6 +36,37 @@ listing the offending/fixed files is posted.
 
 ## Usage
 
+Full example - vendored submodule, prebuilt binary, whole-repo apply on PRs:
+
+```yaml
+name: Tidy
+
+on:
+  pull_request:
+    paths: ["src/**", "**/*.md", ".rust-llm-tidy.yml"]
+  workflow_dispatch:
+
+jobs:
+  tidy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write         # apply: push fixes to the PR branch
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.head_ref }}   # PR head, not merge ref (apply pushes here)
+          submodules: recursive
+      - uses: ./submodules/action
+        with:
+          binary-source: prebuilt   # or 'git' to build from this repo's source
+          mode: apply               # commit + push fixes to the PR branch
+          changed-files: "false"    # whole repo
+```
+
+`mode: apply` commits + pushes fixes itself (`contents: write`); keep
+must-stay-dirty files under `.rust-llm-tidy.yml` `exclude_files`.
+
 ### PR check (recommended)
 
 The headline use: review a pull request in any consuming repository. The
