@@ -540,7 +540,7 @@ runs:
           # Plain GITHUB_TOKEN can't write a fork's PR branch, so push fails.
           if git push origin "HEAD:refs/heads/$HEAD_REF"; then
             { echo "## rust-llm-tidy: :white_check_mark: fixes applied"; echo ""
-              echo "I tidied the files below and pushed commit \`$SHA\`."; echo ""
+              echo "I tidied the files below and pushed commit $SHA."; echo ""
               echo "Changed files:"
               printf '%s\n' "$list"
             } > "$RUNNER_TEMP/rlt-comment.md"
