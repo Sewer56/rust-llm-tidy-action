@@ -443,14 +443,15 @@ runs:
     # One block does everything: run tidy, then (if the tree changed) decide
     # what to do by mode and event:
     #
-    #   apply + PR          -> commit + push the fixes; if the push works post
-    #                          a success comment, else post a comment listing
-    #                          the fixed files and fail.
+    #   apply + PR          -> commit + push the fixes; an impossible push
+    #                          (fork PR) posts a comment listing the fixed
+    #                          files and fails.
     #   check + dirty       -> comment (PR) listing the offending files, fail.
     #   apply (non-PR)      -> old behaviour: mutate, leave the changes in the
     #                          working tree (no push, no comment, no fail).
     #
-    # Comments are only possible on a pull request (no PR/issue otherwise).
+    # Failure comments are only possible on a pull request (no PR/issue
+    # otherwise).
     - name: Run rust-llm-tidy
       id: tidy
       shell: bash
@@ -489,12 +490,11 @@ runs:
         # Nothing changed on disk. This also happens for dry-run, which reports
         # the changes a transformation would make (`severity: "success"`
         # records) without editing the tree, and for non-mutating lint-only
-        # failures. Surface whatever json_table.py rendered (a "Changes" block
-        # and/or the lint table) so the PR shows why the check is green or red;
-        # a truly clean, empty doc just gets a green-tick confirmation. Then
-        # pass the tool's status through.
+        # failures. A failing run comments with whatever json_table.py rendered
+        # (lint table and/or "Changes" block) so the PR shows why it is red.
+        # Then pass the tool's status through.
         if [ -z "$files" ]; then
-          if [ "$IS_PR" = "true" ]; then
+          if [ "$IS_PR" = "true" ] && [ "$TIDY_RC" -ne 0 ]; then
             if [ -f "$RUNNER_TEMP/rlt-run.json" ]; then
               table="$(
                 python3 "${{ github.action_path }}/scripts/json_table.py" \
@@ -502,23 +502,11 @@ runs:
               )"
             fi
             if [ -n "${table:-}" ]; then
-              # Dry-run change reports exit 0; lint-only failures exit non-zero.
-              if [ "$TIDY_RC" -eq 0 ]; then
-                heading="## rust-llm-tidy: changes"
-              else
-                heading="## rust-llm-tidy: not tidy"
-              fi
-              { echo "$heading"; echo ""
+              { echo "## rust-llm-tidy: not tidy"; echo ""
                 printf '%s\n' "$table"
               } > "$RUNNER_TEMP/rlt-comment.md"
               gh pr comment "$PR_NUMBER" --body-file "$RUNNER_TEMP/rlt-comment.md" \
                 || echo "::warning::rust-llm-tidy: could not post report comment" >&2
-            elif [ "$TIDY_RC" -eq 0 ]; then
-              { echo "## rust-llm-tidy: :white_check_mark: all tidy"; echo ""
-                echo "All files are tidy - no changes required."
-              } > "$RUNNER_TEMP/rlt-comment.md"
-              gh pr comment "$PR_NUMBER" --body-file "$RUNNER_TEMP/rlt-comment.md" \
-                || echo "::warning::rust-llm-tidy: could not post success comment" >&2
             fi
           fi
           exit "$TIDY_RC"
@@ -527,7 +515,8 @@ runs:
         printf '%s\n' "$files" > "$RUNNER_TEMP/rlt-fixed-files"
         list="$(printf '%s\n' "$files" | sed 's#^#  - \`#; s#$#\`#')"
 
-        # apply + PR: commit + push; comment success or fail-with-files.
+        # apply + PR: commit + push; on push failure comment the fixed files
+        # and fail.
         if [ "$MODE" = "apply" ] && [ "$IS_PR" = "true" ]; then
           mapfile -t arr <<< "$files"
           git config user.name "$COMMIT_NAME"
@@ -535,17 +524,9 @@ runs:
           git add -- "${arr[@]}"
           git commit -m "Apply rust-llm-tidy fixes" \
             -m "Automated by the rust-llm-tidy GitHub Action." >/dev/null
-          SHA="$(git rev-parse HEAD)"
 
           # Plain GITHUB_TOKEN can't write a fork's PR branch, so push fails.
           if git push origin "HEAD:refs/heads/$HEAD_REF"; then
-            { echo "## rust-llm-tidy: :white_check_mark: fixes applied"; echo ""
-              echo "I tidied the files below and pushed commit $SHA."; echo ""
-              echo "Changed files:"
-              printf '%s\n' "$list"
-            } > "$RUNNER_TEMP/rlt-comment.md"
-            gh pr comment "$PR_NUMBER" --body-file "$RUNNER_TEMP/rlt-comment.md" \
-              || echo "::warning::rust-llm-tidy: could not post success comment" >&2
             exit 0
           fi
 

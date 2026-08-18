@@ -286,8 +286,7 @@ jobs:
           exit "${RLT_STUB_RC:-0}"
           SH
           # The clean stub: writes the tidy content (no diff) and emits an empty
-          # JSON doc, so an already-tidy PR hits the green-tick "all tidy"
-          # branch of the run script.
+          # JSON doc, so an already-tidy PR exits clean without commenting.
           cat > "$RUNNER_TEMP/bin/tidy-clean" <<'SH'
           #!/usr/bin/env bash
           printf 'fn main() { init(); }\nfn init() {}\n' > lib.rs
@@ -334,7 +333,7 @@ jobs:
           git -C "$RUNNER_TEMP/repo" commit -qm tidy-base
           git -C "$RUNNER_TEMP/repo" tag tidy-base
 
-      - name: apply + PR, push succeeds (expect commit + success comment + exit 0)
+      - name: apply + PR, push succeeds (expect commit + exit 0)
         shell: bash
         run: |
           cd "$RUNNER_TEMP/repo"
@@ -342,6 +341,7 @@ jobs:
           git add -A; git commit -qm untidy
           git push -q origin HEAD:refs/heads/feature
 
+          rm -f "$RUNNER_TEMP/rlt-comment.md"
           export PATH="$RUNNER_TEMP/bin:$PATH"
           export MODE=apply IS_PR=true PR_NUMBER=7 HEAD_REF=feature
           export COMMIT_NAME=bot COMMIT_EMAIL=b@b GITHUB_TOKEN=x RLT_BIN="$RUNNER_TEMP/bin/tidy"
@@ -349,8 +349,7 @@ jobs:
           rc=$?
           echo "exit=$rc (expect 0)"
           test "$rc" = 0
-          grep -q "fixes applied" "$RUNNER_TEMP/rlt-comment.md"
-          grep -q '`lib.rs`' "$RUNNER_TEMP/rlt-comment.md"
+          test ! -f "$RUNNER_TEMP/rlt-comment.md"   # success: no comment
           git fetch -q origin && git -C . rev-parse --verify origin/feature >/dev/null
 
       - name: apply + PR, push fails (expect failure comment + exit 1)
@@ -418,7 +417,7 @@ jobs:
           grep -q "fn init()" lib.rs      # mutated
           test ! -f "$RUNNER_TEMP/rlt-comment.md"   # no comment written
 
-      - name: already tidy (expect exit 0 + green-tick success comment)
+      - name: already tidy (expect exit 0, no comment)
         shell: bash
         run: |
           cd "$RUNNER_TEMP/repo"
@@ -430,26 +429,27 @@ jobs:
           export COMMIT_NAME=bot COMMIT_EMAIL=b@b GITHUB_TOKEN=x RLT_BIN="$RUNNER_TEMP/bin/tidy-clean"
           bash "$RUNNER_TEMP/run_dedent.sh"
           echo "exit=$? (expect 0)"
-          grep -q "all tidy" "$RUNNER_TEMP/rlt-comment.md"
+          test ! -f "$RUNNER_TEMP/rlt-comment.md"   # success: no comment
 
-      - name: dry-run reports changes in a Changes block (expect exit 0)
+      - name: dry-run failure reports changes in a Changes block (expect report + exit 1)
         shell: bash
         run: |
           cd "$RUNNER_TEMP/repo"
-          # tidy tree: dry-run records would-be changes without editing.
+          # tidy tree: dry-run records would-be changes without editing, and
+          # the stub rc (1) marks lints remaining so the run fails + comments.
           git reset -q --hard tidy-base && git clean -qfd
           rm -f "$RUNNER_TEMP/rlt-comment.md"
           export PATH="$RUNNER_TEMP/bin:$PATH"
           export MODE=check IS_PR=true PR_NUMBER=7 HEAD_REF=feature
           export COMMIT_NAME=bot COMMIT_EMAIL=b@b GITHUB_TOKEN=x RLT_BIN="$RUNNER_TEMP/bin/tidy-dry-run"
-          bash "$RUNNER_TEMP/run_dedent.sh"
-          rc=$?
-          echo "exit=$rc (expect 0; dry-run reports changes, tree untouched)"
-          test "$rc" = 0
+          export RLT_STUB_RC=1
+          bash "$RUNNER_TEMP/run_dedent.sh" && { echo "should have failed"; exit 1; } || true
+          grep -q 'not tidy' "$RUNNER_TEMP/rlt-comment.md"
           # change record rendered into a Changes block, pipe escaped
           grep -q '^### Changes' "$RUNNER_TEMP/rlt-comment.md"
           grep -q 'REORDER' "$RUNNER_TEMP/rlt-comment.md"
           grep -q 'rearrange fn a_main &#124; from pos 2 to pos 1' "$RUNNER_TEMP/rlt-comment.md"
+          unset RLT_STUB_RC
 
       - name: args builder requests JSON for dry-run too
         shell: bash

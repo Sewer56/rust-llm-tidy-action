@@ -96,8 +96,7 @@ place:
 ```
 
 On success, `apply` pushes with the message
-`Apply rust-llm-tidy fixes`, and posts a PR comment confirming the fix and the
-pushed commit.
+`Apply rust-llm-tidy fixes`.
 
 Both modes post a PR comment on failure, listing the offending/fixed files. To
 allow those comments (and `apply`'s push to a same-repo PR branch), grant the
@@ -257,34 +256,11 @@ A downloaded 7-Zip is cached in `$RUNNER_TEMP/sevenzip-bin`; enable
 
 ### PR comments
 
-The action replies on the PR in one of five ways:
+The action comments on the PR only on failure, in one of two ways:
 
-**1. All tidy** - nothing to change, `check` or `apply` pass:
-
-```markdown
-## rust-llm-tidy: :white_check_mark: all tidy
-
-All files are tidy - no changes required.
-```
-
-**2. Changes** - green, but the run recorded changes it would make (`dry-run`)
-or that fall short of a push; shows a "Changes" block. Table and link fixes
-carry no line number, shown as `-`:
-
-```markdown
-## rust-llm-tidy: changes
-
-### Changes
-| File          | Line | Code      | Change                                                        |
-| ------------- | ---- | --------- | ------------------------------------------------------------- |
-| `README.md`   | -    | `FIX`     | tables were aligned                                           |
-| `src/main.rs` | 5    | `VIS`     | narrow visibility of `helper` at line 5                       |
-| `src/main.rs` | 9    | `REORDER` | rearrange fn `a_main` from pos 3 to pos 1 (before `b_helper`) |
-| `README.md`   | 12   | `FIX`     | flip nested fence at line 12                                  |
-```
-
-**3. Not tidy** - lint findings, job fails. Renders a lint table; if the run
-yielded nothing table-shaped it falls back to a plain file list:
+**1. Not tidy** - lint findings, job fails. Renders a lint table; when the run
+recorded changes (e.g. `dry-run`) a "Changes" block is included. Table and
+link fixes carry no line number, shown as `-`:
 
 ```markdown
 ## rust-llm-tidy: not tidy
@@ -295,19 +271,7 @@ yielded nothing table-shaped it falls back to a plain file list:
 | `src/lib.rs`  | 44   | warning  | `TEST001`| Test fn lacks #[test] attribute         |
 ```
 
-**4. Fixes applied** - `mode: apply` pushed the fix commit to the PR branch:
-
-```markdown
-## rust-llm-tidy: :white_check_mark: fixes applied
-
-I tidied the files below and pushed commit `abc1234`.
-
-Changed files:
-  - `src/main.rs`
-  - `README.md`
-```
-
-**5. Could not push fixes** - `mode: apply` tidied but could not push (fork PR
+**2. Could not push fixes** - `mode: apply` tidied but could not push (fork PR
 or token without write access). Job fails:
 
 ```markdown
