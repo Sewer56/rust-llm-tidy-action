@@ -295,19 +295,23 @@ jobs:
           SH
           # The doc-gap stub: emits only an error-severity lint row (no success
           # change record) and does NOT edit the tree, exercising the empty-files
-          # lint-only failing dry-run branch of the run script.
+          # lint-only failing dry-run branch of the run script. The row carries
+          # a `title` distinct from the TITLES map entry for DOC001, so the
+          # report grep proves the renderer prefers the record's own title.
           cat > "$RUNNER_TEMP/bin/tidy-docgap" <<'SH'
           #!/usr/bin/env bash
-          printf '%s\n' '[{"path":"lib.rs","line":1,"severity":"error","code":"DOC001","message":"missing doc comment for `hello`","item_kind":"fn","item_name":"hello"}]'
+          printf '%s\n' '[{"path":"lib.rs","line":1,"severity":"error","code":"DOC001","message":"missing doc comment for `hello`","item_kind":"fn","item_name":"hello","title":"record-sourced title"}]'
           exit "${RLT_STUB_RC:-1}"
           SH
           # The fallback stub: one mapped error plus one warning with an
           # unmapped lint code (a code from a newer released binary), to pin
           # the unknown-code title fallback and mixed counts; does NOT edit
-          # files, exercising the lint-only failing branch.
+          # files, exercising the lint-only failing branch. The mapped error
+          # carries an empty `title`, pinning the fall-through to the map
+          # (the bullet never renders an empty title).
           cat > "$RUNNER_TEMP/bin/tidy-fallback" <<'SH'
           #!/usr/bin/env bash
-          printf '%s\n' '[{"path":"lib.rs","line":1,"severity":"error","code":"DOC001","message":"non-private item is missing a doc comment","item_kind":"fn","item_name":"hello"},{"path":"lib.rs","line":2,"severity":"warning","code":"DOC009","message":"future lint says fix it","item_kind":"fn","item_name":null}]'
+          printf '%s\n' '[{"path":"lib.rs","line":1,"severity":"error","code":"DOC001","message":"non-private item is missing a doc comment","item_kind":"fn","item_name":"hello","title":""},{"path":"lib.rs","line":2,"severity":"warning","code":"DOC009","message":"future lint says fix it","item_kind":"fn","item_name":null}]'
           exit "${RLT_STUB_RC:-1}"
           SH
           chmod +x "$RUNNER_TEMP/bin/gh" "$RUNNER_TEMP/bin/tidy" "$RUNNER_TEMP/bin/tidy-dry-run" "$RUNNER_TEMP/bin/tidy-clean" "$RUNNER_TEMP/bin/tidy-docgap" "$RUNNER_TEMP/bin/tidy-fallback"
@@ -503,6 +507,8 @@ jobs:
           bash "$RUNNER_TEMP/run_dedent.sh" && { echo "should have failed"; exit 1; } || true
           grep -q 'not tidy' "$RUNNER_TEMP/rlt-comment.md"
           grep -q '^### Errors$' "$RUNNER_TEMP/rlt-comment.md"
+          # the record's own title renders, not the TITLES map entry for DOC001
+          grep -q '\*\*`DOC001` record-sourced title\*\*' "$RUNNER_TEMP/rlt-comment.md"
           grep -q 'DOC001' "$RUNNER_TEMP/rlt-comment.md"
 
       - name: comment locations pin the blob SHA when RLT_BLOB_BASE is set (expect report + exit 1)
@@ -522,6 +528,8 @@ jobs:
           grep -Fq '[lib.rs:2](<https://github.com/o/r/blob/stubsha/lib.rs#L2>)' "$RUNNER_TEMP/rlt-comment.md"
           # unmapped lint code falls back to the raw code as title
           grep -q '\*\*`DOC009` DOC009\*\*' "$RUNNER_TEMP/rlt-comment.md"
+          # empty `title` falls through to the map entry (never renders empty)
+          grep -q '\*\*`DOC001` missing documentation\*\*' "$RUNNER_TEMP/rlt-comment.md"
           grep -q '^1 error, 1 warning\.$' "$RUNNER_TEMP/rlt-comment.md"
           # warnings group under their own section, after Errors
           grep -q '^### Warnings$' "$RUNNER_TEMP/rlt-comment.md"

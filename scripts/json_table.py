@@ -31,7 +31,13 @@ import re
 import sys
 from urllib.parse import quote
 
-# Short human title per lint code; unknown codes fall back to the raw code.
+# Compatibility fallback: short human titles per lint code, used only when a
+# record carries no `title` of its own. Newer rust-llm-tidy binaries emit a
+# friendly `title` on every lint record, but this action's default
+# `binary-source: prebuilt` mode runs released binaries that predate the
+# field and never emit it. finding_lines resolves the bullet title as the
+# record's `title`, then this map, then the raw code; the map is retained
+# because the action does not enforce a minimum binary version.
 TITLES = {
     "DOC001": "missing documentation",
     "DOC002": "missing `# Errors` section",
@@ -104,7 +110,9 @@ def split_guidance(message):
 def finding_lines(record):
     """Markdown lines for one lint finding: bullet, summary, sub-bullets."""
     code = record.get("code", "")
-    title = TITLES.get(code, code)
+    # Record title first; missing/null/empty falls through to the map, and
+    # an unknown code falls through to the raw code (never renders empty).
+    title = record.get("title") or TITLES.get(code) or code
     path = record.get("path", "")
 
     # DOC007/DOC008 messages repeat the location as a `path: ` prefix;
