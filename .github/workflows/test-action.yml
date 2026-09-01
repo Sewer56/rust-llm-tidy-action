@@ -274,7 +274,7 @@ jobs:
           cat > "$RUNNER_TEMP/bin/tidy" <<'SH'
           #!/usr/bin/env bash
           printf 'fn main() { init(); }\nfn init() {}\n' > lib.rs
-          printf '%s\n' '[{"path":"lib.rs","line":1,"severity":"error","code":"DOC001","message":"non-private item | note missing a doc comment (fn `hello`)","item_kind":"fn","item_name":"hello"}]'
+          printf '%s\n' '[{"path":"lib.rs","line":1,"severity":"error","code":"DOC001","message":"non-private item | note missing a doc comment","item_kind":"fn","item_name":"hello"}]'
           exit "${RLT_STUB_RC:-0}"
           SH
           # The dry-run stub: reports the changes a transformation would make
@@ -301,7 +301,16 @@ jobs:
           printf '%s\n' '[{"path":"lib.rs","line":1,"severity":"error","code":"DOC001","message":"missing doc comment for `hello`","item_kind":"fn","item_name":"hello"}]'
           exit "${RLT_STUB_RC:-1}"
           SH
-          chmod +x "$RUNNER_TEMP/bin/gh" "$RUNNER_TEMP/bin/tidy" "$RUNNER_TEMP/bin/tidy-dry-run" "$RUNNER_TEMP/bin/tidy-clean" "$RUNNER_TEMP/bin/tidy-docgap"
+          # The fallback stub: one mapped error plus one warning with an
+          # unmapped lint code (a code from a newer released binary), to pin
+          # the unknown-code title fallback and mixed counts; does NOT edit
+          # files, exercising the lint-only failing branch.
+          cat > "$RUNNER_TEMP/bin/tidy-fallback" <<'SH'
+          #!/usr/bin/env bash
+          printf '%s\n' '[{"path":"lib.rs","line":1,"severity":"error","code":"DOC001","message":"non-private item is missing a doc comment","item_kind":"fn","item_name":"hello"},{"path":"lib.rs","line":2,"severity":"warning","code":"DOC009","message":"future lint says fix it","item_kind":"fn","item_name":null}]'
+          exit "${RLT_STUB_RC:-1}"
+          SH
+          chmod +x "$RUNNER_TEMP/bin/gh" "$RUNNER_TEMP/bin/tidy" "$RUNNER_TEMP/bin/tidy-dry-run" "$RUNNER_TEMP/bin/tidy-clean" "$RUNNER_TEMP/bin/tidy-docgap" "$RUNNER_TEMP/bin/tidy-fallback"
 
       - name: Extract run script + create fixture repo
         shell: bash
@@ -378,7 +387,7 @@ jobs:
           grep -q '`lib.rs`' "$RUNNER_TEMP/rlt-comment.md"
           unset RLT_PUSH_FAIL
 
-      - name: check + dirty PR (expect fail comment with reasons table + exit 1, no commit)
+      - name: check + dirty PR (expect fail comment with findings + exit 1, no commit)
         shell: bash
         run: |
           cd "$RUNNER_TEMP/repo"
@@ -392,11 +401,12 @@ jobs:
           export RLT_STUB_RC=1
           bash "$RUNNER_TEMP/run_dedent.sh" && { echo "should have failed"; exit 1; } || true
           grep -q "not tidy" "$RUNNER_TEMP/rlt-comment.md"
-          # table rendered from the JSON document with the Severity column
-          grep -q '| File | Line | Severity | Code | Reason |' "$RUNNER_TEMP/rlt-comment.md"
-          grep -q 'DOC001' "$RUNNER_TEMP/rlt-comment.md"
-          # pipe in the reason cell is escaped so it cannot split the table
-          grep -q 'non-private item &#124; note missing' "$RUNNER_TEMP/rlt-comment.md"
+          # findings render as severity-grouped bullets from the JSON document
+          grep -q '^1 error\.$' "$RUNNER_TEMP/rlt-comment.md"
+          grep -q '^### Errors$' "$RUNNER_TEMP/rlt-comment.md"
+          grep -q '\*\*`DOC001` missing documentation\*\* - `lib.rs:1`' "$RUNNER_TEMP/rlt-comment.md"
+          # pipe in a finding bullet renders raw (bullets cannot split cells)
+          grep -q 'non-private item | note missing a doc comment' "$RUNNER_TEMP/rlt-comment.md"
           # check mode must NOT commit
           test "$(git rev-parse HEAD)" = "$(git rev-parse HEAD~0)"
 
@@ -492,8 +502,29 @@ jobs:
           export RLT_BIN="$RUNNER_TEMP/bin/tidy-docgap" RLT_STUB_RC=1
           bash "$RUNNER_TEMP/run_dedent.sh" && { echo "should have failed"; exit 1; } || true
           grep -q 'not tidy' "$RUNNER_TEMP/rlt-comment.md"
-          grep -q '| File | Line | Severity | Code | Reason |' "$RUNNER_TEMP/rlt-comment.md"
+          grep -q '^### Errors$' "$RUNNER_TEMP/rlt-comment.md"
           grep -q 'DOC001' "$RUNNER_TEMP/rlt-comment.md"
+
+      - name: comment locations pin the blob SHA when RLT_BLOB_BASE is set (expect report + exit 1)
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP/repo"
+          git reset -q --hard tidy-base && git clean -qfd
+          rm -f "$RUNNER_TEMP/rlt-comment.md"
+          export PATH="$RUNNER_TEMP/bin:$PATH"
+          export MODE=check IS_PR=true PR_NUMBER=7 HEAD_REF=feature
+          export COMMIT_NAME=bot COMMIT_EMAIL=b@b GITHUB_TOKEN=x
+          export RLT_BIN="$RUNNER_TEMP/bin/tidy-fallback" RLT_STUB_RC=1
+          export RLT_BLOB_BASE="https://github.com/o/r/blob/stubsha/"
+          bash "$RUNNER_TEMP/run_dedent.sh" && { echo "should have failed"; exit 1; } || true
+          # linked mode: locations render as SHA-pinned blob links
+          grep -Fq '[lib.rs:1](<https://github.com/o/r/blob/stubsha/lib.rs#L1>)' "$RUNNER_TEMP/rlt-comment.md"
+          grep -Fq '[lib.rs:2](<https://github.com/o/r/blob/stubsha/lib.rs#L2>)' "$RUNNER_TEMP/rlt-comment.md"
+          # unmapped lint code falls back to the raw code as title
+          grep -q '\*\*`DOC009` DOC009\*\*' "$RUNNER_TEMP/rlt-comment.md"
+          grep -q '^1 error, 1 warning\.$' "$RUNNER_TEMP/rlt-comment.md"
+          # warnings group under their own section, after Errors
+          grep -q '^### Warnings$' "$RUNNER_TEMP/rlt-comment.md"
 
   test-skipping-prebuilt-7z-install-apt:
     runs-on: ubuntu-latest

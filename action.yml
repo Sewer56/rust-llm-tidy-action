@@ -464,6 +464,9 @@ runs:
         HEAD_REF: ${{ github.head_ref }}
         COMMIT_NAME: github-actions[bot]
         COMMIT_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+        # PR head SHA (github.sha is the merge commit on PR events); comment
+        # links pin to the exact commit the run linted, immune to later pushes.
+        RLT_BLOB_BASE: ${{ github.server_url }}/${{ github.repository }}/blob/${{ github.event.pull_request.head.sha || github.sha }}/
         GITHUB_TOKEN: ${{ github.token }}
       run: |
         set -euo pipefail
@@ -491,7 +494,8 @@ runs:
         # the changes a transformation would make (`severity: "success"`
         # records) without editing the tree, and for non-mutating lint-only
         # failures. A failing run comments with whatever json_table.py rendered
-        # (lint table and/or "Changes" block) so the PR shows why it is red.
+        # (finding sections and/or "Changes" table) so the PR shows why it is
+        # red.
         # Then pass the tool's status through.
         if [ -z "$files" ]; then
           if [ "$IS_PR" = "true" ] && [ "$TIDY_RC" -ne 0 ]; then
@@ -548,11 +552,10 @@ runs:
         # check + dirty: comment (PR) and fail. apply (non-PR): leave changes.
         if [ "$MODE" = "check" ] || [ "$IS_PR" = "true" ]; then
           if [ "$IS_PR" = "true" ]; then
-            # Table of changed files with lint reasons (and any recorded
-            # changes) from the run's stdout JSON document via the
-            # JSON-to-markdown converter. Every run emits JSON (real and
-            # dry-run), so the doc can carry lint findings and/or a "Changes"
-            # block. Fall back to a plain list when that yields nothing.
+            # Rendered report (finding sections and/or a "Changes" table)
+            # from the run's stdout JSON document via the JSON-to-markdown
+            # converter. Every run emits JSON (real and dry-run). Fall back
+            # to a plain list when that yields nothing.
             if [ -f "$RUNNER_TEMP/rlt-run.json" ]; then
               table="$(
                 python3 "${{ github.action_path }}/scripts/json_table.py" \

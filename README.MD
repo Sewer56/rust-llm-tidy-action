@@ -258,18 +258,37 @@ A downloaded 7-Zip is cached in `$RUNNER_TEMP/sevenzip-bin`; enable
 
 The action comments on the PR only on failure, in one of two ways:
 
-**1. Not tidy** - lint findings, job fails. Renders a lint table; when the run
-recorded changes (e.g. `dry-run`) a "Changes" block is included. Table and
-link fixes carry no line number, shown as `-`:
+**1. Not tidy** - lint findings, job fails. Findings group by severity,
+one bullet each; recorded changes (e.g. `dry-run`) follow as a table.
+Lineless fixes (table, link) show `-`:
 
 ```markdown
 ## rust-llm-tidy: not tidy
 
-| File          | Line | Severity | Code     | Reason                                  |
-| ------------- | ---- | -------- | -------- | --------------------------------------- |
-| `src/main.rs` | 12   | error    | `DOC002` | Missing ## Errors section               |
-| `src/lib.rs`  | 44   | warning  | `TEST001`| Test fn lacks #[test] attribute         |
+1 error, 1 warning, 1 change.
+
+### Errors
+
+- **`DOC002` missing `# Errors` section** -
+  [src/main.rs:12](<<repo>/blob/<sha>/src/main.rs#L12>)
+  pub fn returning Result is missing a `# Errors` doc section (fn `load`)
+
+### Warnings
+
+- **`DOC008` long line** -
+  [src/lib.rs:9](<<repo>/blob/<sha>/src/lib.rs#L9>)
+  line 9 is 95 chars long, over the 80-char limit.
+  - Split it at the nearest idea change with a blank line;
+  - code-block lines count too.
+
+### Changes
+
+| File          | Line | Code      | Change                                  |
+| ------------- | ---- | --------- | --------------------------------------- |
+| `src/main.rs` | 20   | `REORDER` | rearrange fn a_main from pos 2 to pos 1 |
 ```
+
+Links pin the PR head SHA, so they stay valid after later pushes.
 
 **2. Could not push fixes** - `mode: apply` tidied but could not push (fork PR
 or token without write access). Job fails:
