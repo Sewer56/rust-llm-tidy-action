@@ -16,6 +16,15 @@ on:
       - ".github/workflows/test-action.yml"
 
 jobs:
+  test-scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Action Repository
+        uses: actions/checkout@v7
+
+      - name: Run script unit tests
+        run: python3 -m unittest discover -s scripts/tests -v
+
   test-prebuilt-mode:
     strategy:
       fail-fast: false
