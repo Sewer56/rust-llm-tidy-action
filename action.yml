@@ -79,7 +79,8 @@ inputs:
   source-path:
     description: >-
       Path to a rust-llm-tidy source checkout (manifest expected at
-      <path>/src/Cargo.toml). Defaults to the current repository checkout
+      <path>/Cargo.toml or, for older layouts, <path>/src/Cargo.toml).
+      Defaults to the current repository checkout
       (github.workspace); in the vendored submodule layout that is the
       enclosing rust-llm-tidy repo itself, so 'git' mode builds from
       your own current source. Set explicitly for non-rust-llm-tidy repos.
@@ -197,9 +198,19 @@ runs:
         RLT_SOURCE_PATH: ${{ inputs.source-path }}
       run: |
         if [ "${{ inputs.use-source-checkout }}" = "true" ]; then
-          echo "source_dir=${{ github.workspace }}/.rlt-source" >> "$GITHUB_OUTPUT"
+          SOURCE_DIR="${{ github.workspace }}/.rlt-source"
         else
-          printf 'source_dir=%s\n' "$RLT_SOURCE_PATH" >> "$GITHUB_OUTPUT"
+          SOURCE_DIR="$RLT_SOURCE_PATH"
+        fi
+        printf 'source_dir=%s\n' "$SOURCE_DIR" >> "$GITHUB_OUTPUT"
+        # rust-llm-tidy >= 1.4 keeps the workspace manifest at the repo root;
+        # older layouts keep it under src/. Probe both.
+        if [ -f "$SOURCE_DIR/Cargo.toml" ]; then
+          printf 'manifest=%s\n' "$SOURCE_DIR/Cargo.toml" >> "$GITHUB_OUTPUT"
+        elif [ -f "$SOURCE_DIR/src/Cargo.toml" ]; then
+          printf 'manifest=%s\n' "$SOURCE_DIR/src/Cargo.toml" >> "$GITHUB_OUTPUT"
+        else
+          echo "manifest=" >> "$GITHUB_OUTPUT"
         fi
 
     # ── Prebuilt binary (prebuilt mode) ──────────────────────
@@ -294,14 +305,15 @@ runs:
       with:
         cache-on-failure: true
         cache-all-crates: true
-        # The rust-llm-tidy source checkout keeps its workspace manifest at
-        # <source>/src; point rust-cache there so its `cargo metadata` probe
-        # resolves instead of failing against the repository root.
-        workspaces: "${{ steps.source.outputs.source_dir }}/src -> target"
+        # The rust-llm-tidy source checkout keeps its workspace manifest either
+        # at the repo root (>= 1.4) or under src/ (older); point rust-cache at
+        # the resolved manifest so its `cargo metadata` probe resolves instead
+        # of failing against the wrong directory.
+        workspaces: "${{ steps.source.outputs.manifest }} -> target"
         # Builds go to $RUNNER_TEMP/rlt-target (never the workspace), so the
-        # workspace target under `src/` stays empty; cache the real build dir
-        # explicitly so later runs rebuild from a warm target instead of
-        # compiling the workspace from scratch.
+        # workspace target stays empty; cache the real build dir explicitly so
+        # later runs rebuild from a warm target instead of compiling the
+        # workspace from scratch.
         cache-directories: "${{ runner.temp }}/rlt-target"
 
     - name: Build rust-llm-tidy from source
@@ -310,19 +322,20 @@ runs:
       shell: bash
       env:
         RLT_SOURCE_DIR: ${{ steps.source.outputs.source_dir }}
+        RLT_MANIFEST: ${{ steps.source.outputs.manifest }}
         RLT_TARGET_DIR: ${{ runner.temp }}/rlt-target
         RLT_USE_SOURCE_CHECKOUT: ${{ inputs.use-source-checkout }}
         RLT_SOURCE_CHECKOUT_DIR: ${{ github.workspace }}/.rlt-source
       run: |
         set -euo pipefail
-        if [ ! -f "$RLT_SOURCE_DIR/src/Cargo.toml" ]; then
-          echo "::error::source-path $RLT_SOURCE_DIR has no src/Cargo.toml; point source-path at a rust-llm-tidy checkout or set use-source-checkout: true" >&2
+        if [ -z "$RLT_MANIFEST" ]; then
+          echo "::error::source-path $RLT_SOURCE_DIR has no root or src/ Cargo.toml; point source-path at a rust-llm-tidy checkout or set use-source-checkout: true" >&2
           exit 1
         fi
         # Build into a temp target dir so no artifacts (binaries) are left
         # inside the source checkout / current repository.
         cargo build --release \
-          --manifest-path "$RLT_SOURCE_DIR/src/Cargo.toml" \
+          --manifest-path "$RLT_MANIFEST" \
           --target-dir "$RLT_TARGET_DIR" \
           -p rust-llm-tidy-cli --bin rust-llm-tidy
         BIN="$RLT_TARGET_DIR/release/rust-llm-tidy"
