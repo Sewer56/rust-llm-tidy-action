@@ -435,7 +435,11 @@ runs:
                   exit 1
                 fi
               fi
-              mapfile -t changed < <(git diff --name-only --diff-filter=ACMR "$base"...HEAD)
+              # bash 3.2 (macOS runners) has no mapfile.
+              changed=()
+              while IFS= read -r p; do
+                changed+=("$p")
+              done < <(git diff --name-only --diff-filter=ACMR "$base"...HEAD)
               paths=("${changed[@]}")
             else
               # Non-PR (push/workflow_dispatch): let the CLI use the
@@ -585,7 +589,11 @@ runs:
         # apply + PR: commit + push; on push failure comment the fixed files
         # and fail.
         if [ "$MODE" = "apply" ] && [ "$IS_PR" = "true" ]; then
-          mapfile -t arr <<< "$files"
+          # bash 3.2 (macOS runners) has no mapfile.
+          arr=()
+          while IFS= read -r f; do
+            arr+=("$f")
+          done <<< "$files"
           git config user.name "$COMMIT_NAME"
           git config user.email "$COMMIT_EMAIL"
           git add -- "${arr[@]}"

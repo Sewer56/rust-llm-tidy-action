@@ -1,0 +1,27 @@
+name: fixture gh stub
+description: >-
+  Replace gh for jobs that lint fixtures: sticky reporting skips as stale
+  and comment posts succeed without touching this repository's PRs.
+runs:
+  using: composite
+  steps:
+    - name: Install gh stub
+      shell: bash
+      run: |
+        mkdir -p "$RUNNER_TEMP/rlt-gh-stub"
+        cat > "$RUNNER_TEMP/rlt-gh-stub/gh" <<'SH'
+        #!/usr/bin/env bash
+        # Fixture runs are not this repository's PR: the revision probe
+        # never matches (report skips as stale) and comment posts do nothing.
+        if [ "$1" = "api" ]; then
+          case "$*" in
+            *"/pulls/"*) printf '{"head":{"sha":"0"}}\n' ;;
+            *) printf '[]\n' ;;
+          esac
+          exit 0
+        fi
+        printf '{"id":1,"html_url":"stubbed"}\n'
+        exit 0
+        SH
+        chmod +x "$RUNNER_TEMP/rlt-gh-stub/gh"
+        echo "$RUNNER_TEMP/rlt-gh-stub" >> "$GITHUB_PATH"

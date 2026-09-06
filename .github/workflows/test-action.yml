@@ -7,12 +7,14 @@ on:
     paths:
       - "action.yml"
       - "scripts/**"
+      - ".github/actions/**"
       - ".github/workflows/test-action.yml"
   push:
     branches: [main]
     paths:
       - "action.yml"
       - "scripts/**"
+      - ".github/actions/**"
       - ".github/workflows/test-action.yml"
 
 jobs:
@@ -38,6 +40,9 @@ jobs:
       - name: Checkout Action Repository
         uses: actions/checkout@v7
 
+      - name: Keep fixture reporting off this repository's PRs
+        uses: ./.github/actions/fixture-gh-stub
+
       - name: Create standalone git repo fixture with untidy baseline
         shell: bash
         run: |
@@ -53,6 +58,9 @@ jobs:
           git -C fixture config user.name ci
           git -C fixture add -A
           git -C fixture commit -qm "untidy baseline"
+          # Bare remote: apply mode pushes its fixes on pull_request events.
+          git init -q --bare "$RUNNER_TEMP/fixture-origin"
+          git -C fixture remote add origin "$RUNNER_TEMP/fixture-origin"
 
       - name: Run action (prebuilt, apply)
         id: tidy
@@ -65,7 +73,7 @@ jobs:
           no-config: "true"
           sevenzip-source: "fetch"   # force standalone 7-Zip download path
           release-repo: Sewer56/rust-llm-tidy
-          release-tag: 0.1.0
+          release-tag: 0.5.0
 
       - name: Assert applied + reordered
         shell: bash
@@ -82,7 +90,8 @@ jobs:
         shell: bash
         run: |
           git -C fixture add -A
-          git -C fixture commit -qm "applied tidy"
+          # PR events: the action already committed; push events: commit here.
+          git -C fixture commit -qm "applied tidy" || true
 
       - name: Run action again (prebuilt, check mode must pass)
         uses: ./
@@ -94,7 +103,7 @@ jobs:
           no-config: "true"
           mode: "check"
           release-repo: Sewer56/rust-llm-tidy
-          release-tag: 0.1.0
+          release-tag: 0.5.0
 
       - name: Reintroduce untidy edit
         shell: bash
@@ -112,7 +121,7 @@ jobs:
           no-config: "true"
           mode: "check"
           release-repo: Sewer56/rust-llm-tidy
-          release-tag: 0.1.0
+          release-tag: 0.5.0
 
       - name: Assert recheck failed on untidy
         shell: bash
@@ -123,6 +132,9 @@ jobs:
     steps:
       - name: Checkout Action Repository
         uses: actions/checkout@v7
+
+      - name: Keep fixture reporting off this repository's PRs
+        uses: ./.github/actions/fixture-gh-stub
 
       - name: Run action (git mode, build from source checkout)
         id: tidy
@@ -157,6 +169,9 @@ jobs:
       - name: Checkout Action Repository
         uses: actions/checkout@v7
 
+      - name: Keep fixture reporting off this repository's PRs
+        uses: ./.github/actions/fixture-gh-stub
+
       - name: Create clean baseline repo, then untidy edit
         shell: bash
         run: |
@@ -170,6 +185,9 @@ jobs:
           git -C fixture commit -qm baseline
           # working-tree edit = untidy (caller before callee is wrong order)
           printf 'fn b() { a(); }\nfn a() {}\n' > fixture/lib.rs
+          # Bare remote: apply mode pushes its fixes on pull_request events.
+          git init -q --bare "$RUNNER_TEMP/fixture-origin"
+          git -C fixture remote add origin "$RUNNER_TEMP/fixture-origin"
 
       - name: Run action in check mode (must fail on dirty tree)
         id: dirty
@@ -201,7 +219,8 @@ jobs:
         shell: bash
         run: |
           git -C fixture add -A
-          git -C fixture commit -qm "applied tidy"
+          # PR events: the action already committed; push events: commit here.
+          git -C fixture commit -qm "applied tidy" || true
 
       - name: Re-run check mode after apply (must pass)
         uses: ./
@@ -219,16 +238,31 @@ jobs:
       - name: Checkout Action Repository
         uses: actions/checkout@v7
 
+      - name: Keep fixture reporting off this repository's PRs
+        uses: ./.github/actions/fixture-gh-stub
+
       - name: Create clean baseline repo, then untidy edit (only this file changed)
         shell: bash
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
         run: |
           mkdir -p fixture
+          git init -q fixture
+          # PR events: branch the fixture from the PR base sha so the
+          # changed-files diff resolves. Push events: no base; the CLI
+          # falls back to the working-tree diff.
+          if [ -n "$PR_BASE" ]; then
+            # Fetch from origin, not this (shallow) checkout: git refuses
+            # to update shallow roots through a local fetch.
+            url="$(git -C "$GITHUB_WORKSPACE" remote get-url origin)"
+            git -C fixture fetch -q "$url" "$PR_BASE"
+            git -C fixture checkout -q FETCH_HEAD
+          fi
+          git -C fixture config user.email ci@test
+          git -C fixture config user.name ci
           # committed baseline = tidy for two files; then untidy ONE
           printf 'fn main() { init(); }\nfn init() {}\n' > fixture/lib.rs
           printf 'fn other() {}\n' > fixture/other.rs
-          git init -q fixture
-          git -C fixture config user.email ci@test
-          git -C fixture config user.name ci
           git -C fixture add -A
           git -C fixture commit -qm baseline
           # untidy working-tree edit (caller before callee is wrong order)
@@ -347,20 +381,23 @@ jobs:
       - name: Extract run script + create fixture repo
         shell: bash
         run: |
+          # Build the github.action_path needle from parts: written
+          # literally, this workflow's evaluator would substitute it (empty)
+          # before bash runs. Resolved to this checkout (PWD).
           python3 - <<'PY'
+          import os
           import yaml
           d = yaml.safe_load(open('action.yml'))
-          for s in d['runs']['steps']:
-              if s.get('id') == 'tidy':
-                  open('run.sh', 'w').write(s['run'])
+          src = next(s['run'] for s in d['runs']['steps'] if s.get('id') == 'tidy')
+          needle = "$" + "{{ github.action_path }}"
+          text = "\n".join(
+              line[8:] if line.startswith(" " * 8) else line
+              for line in src.split("\n")
+          )
+          text = text.replace(needle, os.getcwd())
+          path = os.path.join(os.environ["RUNNER_TEMP"], "run_dedent.sh")
+          open(path, "w").write(text)
           PY
-          sed 's/^        //' run.sh > "$RUNNER_TEMP/run_dedent.sh"
-          # The extracted script references the helper via the runtime template
-          # ${{ github.action_path }}, which GitHub only substitutes when the
-          # composite action runs via `uses:`. This harness runs the script
-          # directly with bash from the action checkout, so resolve the helper
-          # path to this checkout now (PWD is the action repo working dir).
-          sed -i "s#\${{ github.action_path }}#$PWD#g" "$RUNNER_TEMP/run_dedent.sh"
 
           git init -q --bare "$RUNNER_TEMP/origin"
           git init -q "$RUNNER_TEMP/repo"
@@ -537,31 +574,38 @@ jobs:
       - name: args builder requests JSON for dry-run too
         shell: bash
         run: |
+          # Substitute the inputs.* templates (dry-run = true), building the
+          # needles from parts so this workflow's evaluator does not
+          # substitute them first. Remaining inputs: RLT_* env vars below.
           python3 - <<'PY'
+          import os
           import yaml
           d = yaml.safe_load(open('action.yml'))
-          for s in d['runs']['steps']:
-              if s.get('id') == 'args':
-                  open('args.sh', 'w').write(s['run'])
+          src = next(s['run'] for s in d['runs']['steps'] if s.get('id') == 'args')
+          text = "\n".join(
+              line[8:] if line.startswith(" " * 8) else line
+              for line in src.split("\n")
+          )
+          for key, value in (
+              ("inputs.validate", "false"),
+              ("inputs.no-config", "false"),
+              ("inputs.dry-run", "true"),
+          ):
+              text = text.replace("$" + "{{ " + key + " }}", value)
+          path = os.path.join(os.environ["RUNNER_TEMP"], "args_dedent.sh")
+          open(path, "w").write(text)
           PY
-          sed 's/^        //' args.sh > "$RUNNER_TEMP/args_dedent.sh"
-          # Substitute the ${{ inputs.* }} templates that appear in the args
-          # step's run body (dry-run = true) so it runs standalone like the
-          # real action, exactly as the run-script harness substitutes
-          # ${{ github.action_path }}. The remaining inputs are wired via the
-          # RLT_* env vars below.
-          sed -i -e 's#\${{ inputs.validate }}#false#g' \
-            -e 's#\${{ inputs.no-config }}#false#g' \
-            -e 's#\${{ inputs.dry-run }}#true#g' \
-            "$RUNNER_TEMP/args_dedent.sh"
           cd "$RUNNER_TEMP/repo"
           RLT_CONFIG_PATH= RLT_INCLUDE= RLT_EXCLUDE= \
           RLT_PATH_LIST= RLT_DEFAULT_FILES= RLT_CHANGED_FILES= \
           bash "$RUNNER_TEMP/args_dedent.sh"
           args=(); while IFS= read -r -d '' a; do args+=("$a"); done < "$RUNNER_TEMP/rlt-args"
-          printf '%s\n' "${args[@]}" | grep -q -- '--dry-run'
-          printf '%s\n' "${args[@]}" | grep -q -- '--output-mode json'
-          test "${#args[@]}" -gt 0
+          # Exact argv: JSON output, dry-run, whole-project path.
+          expected=(--output-mode json --dry-run .)
+          test "${#args[@]}" -eq "${#expected[@]}"
+          for i in "${!expected[@]}"; do
+            test "${args[$i]}" = "${expected[$i]}"
+          done
 
       - name: check + PR, lint-only failing dry-run (expect report + exit 1)
         shell: bash
@@ -609,11 +653,22 @@ jobs:
       - name: Checkout Action Repository
         uses: actions/checkout@v7
 
+      - name: Keep fixture reporting off this repository's PRs
+        uses: ./.github/actions/fixture-gh-stub
+
       - name: Create fixture
         shell: bash
         run: |
           mkdir -p fixture
           printf 'fn b() { a(); }\nfn a() {}\n' > fixture/lib.rs
+          git init -q fixture
+          git -C fixture config user.email ci@test
+          git -C fixture config user.name ci
+          git -C fixture add -A
+          git -C fixture commit -qm untidy-baseline
+          # Bare remote: apply mode pushes its fixes on pull_request events.
+          git init -q --bare "$RUNNER_TEMP/fixture-origin"
+          git -C fixture remote add origin "$RUNNER_TEMP/fixture-origin"
 
       - name: Install p7zip
         shell: bash
@@ -632,7 +687,7 @@ jobs:
           no-config: "true"
           sevenzip-source: "apt"
           release-repo: Sewer56/rust-llm-tidy
-          release-tag: 0.1.0
+          release-tag: 0.5.0
 
       - name: Assert apply worked
         shell: bash
