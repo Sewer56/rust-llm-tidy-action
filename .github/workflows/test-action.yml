@@ -252,8 +252,10 @@ jobs:
           # changed-files diff resolves. Push events: no base; the CLI
           # falls back to the working-tree diff.
           if [ -n "$PR_BASE" ]; then
-            git -C "$GITHUB_WORKSPACE" fetch --depth=1 origin "$PR_BASE"
-            git -C fixture fetch -q "$GITHUB_WORKSPACE" "$PR_BASE"
+            # Fetch from origin, not this (shallow) checkout: git refuses
+            # to update shallow roots through a local fetch.
+            url="$(git -C "$GITHUB_WORKSPACE" remote get-url origin)"
+            git -C fixture fetch -q "$url" "$PR_BASE"
             git -C fixture checkout -q FETCH_HEAD
           fi
           git -C fixture config user.email ci@test
