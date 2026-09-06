@@ -17,7 +17,7 @@ Use cases:
 How a binary is obtained:
 
 1. **`prebuilt`** (default) - downloads a prebuilt release artifact (see
-   [Releases](#releases)).
+   [Releases]).
 2. **`git`** - builds `rust-llm-tidy-cli` from a source checkout: the current
    repository by default (the vendored submodule layout), or a pinned remote
    checkout.
@@ -100,8 +100,9 @@ On success, `apply` pushes with the message
 
 Both modes post a PR comment on failure, listing the offending/fixed files. To
 allow those comments (and `apply`'s push to a same-repo PR branch), grant the
-job `contents: write` and `pull-requests: write`. `check` needs
-`pull-requests: write` to comment.
+job `contents: write` and `pull-requests: write`.
+
+`check` needs `pull-requests: write` to comment.
 
 ### PR check
 
@@ -265,7 +266,7 @@ Lineless fixes (table, link) show `-`:
 ```markdown
 ## rust-llm-tidy: not tidy
 
-1 error, 1 warning, 1 change.
+1 error, 1 warning, 1 hint, 1 change.
 
 ### Errors
 
@@ -280,6 +281,12 @@ Lineless fixes (table, link) show `-`:
   line 9 is 95 chars long, over the 80-char limit.
   - Split it at the nearest idea change with a blank line;
   - code-block lines count too.
+
+### Hints - consider looking at these
+
+- **`DOC004` missing `# Arguments` section** -
+  [src/app.rs:40](<<repo>/blob/<sha>/src/app.rs#L40>)
+  consider pre-allocating the buffer.
 
 ### Changes
 
@@ -315,3 +322,4 @@ Apache-2.0, matching [`rust-llm-tidy`][rust-llm-tidy].
 [release-repo]: https://github.com/Sewer56/rust-llm-tidy/releases
 [config]: https://github.com/Sewer56/rust-llm-tidy#configuration
 [7zip]: https://github.com/ip7z/7zip
+[Releases]: #releases

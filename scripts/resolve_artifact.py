@@ -2,16 +2,14 @@
 """Download and extract a rust-llm-tidy release artifact using a native 7-Zip.
 
 Reads GitHub-Action-style env inputs:
-  INPUT_RELEASE_REPO   - owner/name of the repo hosting rust-llm-tidy releases
-  INPUT_RELEASE_TAG    - release tag; empty = latest release
-  INPUT_DOWNLOAD_ASSET - exact asset name to use; empty = auto-detect from the
-                         runner OS/arch
-  INPUT_INSTALL_DIR    - install dir; relative paths resolve under $RUNNER_TEMP
-  SEVENZIP_BINARY      - path to a native 7-Zip CLI (from ensure_7z.py); empty
-                         falls back to 7z/7zz on PATH or libarchive tar
-  RUNNER_OS / RUNNER_ARCH - current runner platform (auto-detect fallback)
-  RUNNER_TEMP          - temp dir for relative install paths
-  GITHUB_TOKEN         - optional token (higher rate limits, private repos)
+- `INPUT_RELEASE_REPO`: owner/name of the repository hosting releases
+- `INPUT_RELEASE_TAG`: release tag; empty selects the latest release
+- `INPUT_DOWNLOAD_ASSET`: exact asset name; empty selects by runner platform
+- `INPUT_INSTALL_DIR`: install directory; relative to `$RUNNER_TEMP`
+- `SEVENZIP_BINARY`: archiver path; empty searches the runner
+- `RUNNER_OS` / `RUNNER_ARCH`: runner platform; defaults to Linux/X64
+- `RUNNER_TEMP`: temporary directory for relative install paths
+- `GITHUB_TOKEN`: optional token for higher rate limits and private repositories
 
 Asset naming conventions understood (in priority order, given the runner):
   - Plain binary:  rust-llm-tidy-<target> , rust-llm-tidy

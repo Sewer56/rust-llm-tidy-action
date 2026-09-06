@@ -16,6 +16,15 @@ on:
       - ".github/workflows/test-action.yml"
 
 jobs:
+  test-scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Action Repository
+        uses: actions/checkout@v7
+
+      - name: Run script unit tests
+        run: python3 -m unittest discover -s scripts/tests -v
+
   test-prebuilt-mode:
     strategy:
       fail-fast: false
@@ -260,8 +269,27 @@ jobs:
         shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP/bin"
+          # gh stub: `gh pr comment` prints the comment body; `gh api`
+          # answers the findings-report REST surfaces offline. The PR
+          # head mirrors the remote branch (what the run pushed or the
+          # step set up), falling back to RLT_HEAD_SHA and then HEAD.
           cat > "$RUNNER_TEMP/bin/gh" <<'SH'
           #!/usr/bin/env bash
+          if [ "$1" = "api" ]; then
+            printf '%s\n' "$*" >> "$RUNNER_TEMP/gh-api.log"
+            head="$(git rev-parse --verify origin/feature 2>/dev/null \
+                    || printf '%s' "${RLT_HEAD_SHA:-$(git rev-parse HEAD)}")"
+            case "$*" in
+              *"--method GET user"*) printf '{"login":"ci-bot"}\n' ;;
+              *"pulls/7"*) printf '{"number":7,"head":{"sha":"%s"}}\n' "$head" ;;
+              *"--method POST"*|*"--method PATCH"*)
+                cat > "$RUNNER_TEMP/gh-api-body.json"
+                printf '{"id":42,"html_url":"https://github.test/o/r/issues/7#issuecomment-42"}\n'
+                ;;
+              *) printf '[]\n' ;;
+            esac
+            exit 0
+          fi
           f="$(echo "$@" | sed -n 's/.*--body-file \([^ ]*\).*/\1/p')"
           echo "===== GH COMMENT ====="
           cat "$f"
@@ -354,8 +382,11 @@ jobs:
           git add -A; git commit -qm untidy
           git push -q origin HEAD:refs/heads/feature
 
-          rm -f "$RUNNER_TEMP/rlt-comment.md"
+          rm -f "$RUNNER_TEMP/rlt-comment.md" "$RUNNER_TEMP/gh-api.log" \
+                "$RUNNER_TEMP/gh-api-body.json"
           export PATH="$RUNNER_TEMP/bin:$PATH"
+          # The pre-push PR head, as the real action always exports it.
+          export RLT_HEAD_SHA="$(git rev-parse HEAD)"
           export MODE=apply IS_PR=true PR_NUMBER=7 HEAD_REF=feature
           export COMMIT_NAME=bot COMMIT_EMAIL=b@b GITHUB_TOKEN=x RLT_BIN="$RUNNER_TEMP/bin/tidy"
           bash "$RUNNER_TEMP/run_dedent.sh"
@@ -364,6 +395,12 @@ jobs:
           test "$rc" = 0
           test ! -f "$RUNNER_TEMP/rlt-comment.md"   # success: no comment
           git fetch -q origin && git -C . rev-parse --verify origin/feature >/dev/null
+          # The findings report publishes once, at the pushed revision
+          # (never the stale pre-push head in RLT_HEAD_SHA).
+          posts="$(grep -c -- '--method POST' "$RUNNER_TEMP/gh-api.log" || true)"
+          test "$posts" = 1
+          grep -Fq "blob/$(git rev-parse HEAD)/lib.rs#L1" "$RUNNER_TEMP/gh-api-body.json"
+          ! grep -Fq "blob/$RLT_HEAD_SHA/lib.rs" "$RUNNER_TEMP/gh-api-body.json"
 
       - name: apply + PR, push fails (expect failure comment + exit 1)
         shell: bash
@@ -382,6 +419,14 @@ jobs:
           SH
           chmod +x "$RUNNER_TEMP/bin/git"
 
+          # The PR head this run reports on: untidy2, pushed so the
+          # remote (and the stub's PR head) match it; the run's own push
+          # below then fails. The head view needs the run's argv file
+          # (normally written by the args step).
+          git push -q origin HEAD:refs/heads/feature
+          export RLT_HEAD_SHA="$(git rev-parse HEAD)"
+          printf '%s\0' --output-mode json . > "$RUNNER_TEMP/rlt-args"
+          rm -f "$RUNNER_TEMP/gh-api.log" "$RUNNER_TEMP/gh-api-body.json"
           export PATH="$RUNNER_TEMP/bin:$PATH"
           export MODE=apply IS_PR=true PR_NUMBER=7 HEAD_REF=feature
           export COMMIT_NAME=bot COMMIT_EMAIL=b@b GITHUB_TOKEN=x
@@ -389,6 +434,10 @@ jobs:
           bash "$RUNNER_TEMP/run_dedent.sh" && { echo "should have failed"; exit 1; } || true
           grep -q "could not push fixes" "$RUNNER_TEMP/rlt-comment.md"
           grep -q '`lib.rs`' "$RUNNER_TEMP/rlt-comment.md"
+          # The report describes the PR head, not the local fix commit.
+          posts="$(grep -c -- '--method POST' "$RUNNER_TEMP/gh-api.log" || true)"
+          test "$posts" = 1
+          grep -Fq "blob/$RLT_HEAD_SHA/lib.rs#L1" "$RUNNER_TEMP/gh-api-body.json"
           unset RLT_PUSH_FAIL
 
       - name: check + dirty PR (expect fail comment with findings + exit 1, no commit)
@@ -403,6 +452,14 @@ jobs:
           export MODE=check IS_PR=true PR_NUMBER=7 HEAD_REF=feature
           export COMMIT_NAME=bot COMMIT_EMAIL=b@b GITHUB_TOKEN=x RLT_BIN="$RUNNER_TEMP/bin/tidy"
           export RLT_STUB_RC=1
+          # The PR head this run reports on: untidy3, pushed (force: the
+          # fixture history diverged) so the remote matches it. The head
+          # view needs the run's argv file (normally written by the args
+          # step).
+          git push -q -f origin HEAD:refs/heads/feature
+          export RLT_HEAD_SHA="$(git rev-parse HEAD)"
+          printf '%s\0' --output-mode json . > "$RUNNER_TEMP/rlt-args"
+          rm -f "$RUNNER_TEMP/gh-api.log" "$RUNNER_TEMP/gh-api-body.json"
           bash "$RUNNER_TEMP/run_dedent.sh" && { echo "should have failed"; exit 1; } || true
           grep -q "not tidy" "$RUNNER_TEMP/rlt-comment.md"
           # findings render as severity-grouped bullets from the JSON document
@@ -413,6 +470,11 @@ jobs:
           grep -q 'non-private item | note missing a doc comment' "$RUNNER_TEMP/rlt-comment.md"
           # check mode must NOT commit
           test "$(git rev-parse HEAD)" = "$(git rev-parse HEAD~0)"
+          # The report describes the committed PR head, not the fixes left
+          # uncommitted in the tree.
+          posts="$(grep -c -- '--method POST' "$RUNNER_TEMP/gh-api.log" || true)"
+          test "$posts" = 1
+          grep -Fq "blob/$RLT_HEAD_SHA/lib.rs#L1" "$RUNNER_TEMP/gh-api-body.json"
 
       - name: apply non-PR (expect mutate + leave changes, exit 0, no comment)
         shell: bash
@@ -436,14 +498,21 @@ jobs:
         run: |
           cd "$RUNNER_TEMP/repo"
           git reset -q --hard tidy-base && git clean -qfd   # tree already tidy
+          # Keep the remote PR head at this revision (force: diverged).
+          git push -q -f origin HEAD:refs/heads/feature
 
-          rm -f "$RUNNER_TEMP/rlt-comment.md"
+          rm -f "$RUNNER_TEMP/rlt-comment.md" "$RUNNER_TEMP/gh-api.log" \
+                "$RUNNER_TEMP/gh-api-body.json"
           export PATH="$RUNNER_TEMP/bin:$PATH"
           export MODE=apply IS_PR=true PR_NUMBER=7 HEAD_REF=feature
           export COMMIT_NAME=bot COMMIT_EMAIL=b@b GITHUB_TOKEN=x RLT_BIN="$RUNNER_TEMP/bin/tidy-clean"
           bash "$RUNNER_TEMP/run_dedent.sh"
           echo "exit=$? (expect 0)"
           test ! -f "$RUNNER_TEMP/rlt-comment.md"   # success: no comment
+          # No findings and no prior report: nothing is published.
+          if [ -f "$RUNNER_TEMP/gh-api.log" ]; then
+            ! grep -q -- '--method POST' "$RUNNER_TEMP/gh-api.log"
+          fi
 
       - name: dry-run failure reports changes in a Changes block (expect report + exit 1)
         shell: bash

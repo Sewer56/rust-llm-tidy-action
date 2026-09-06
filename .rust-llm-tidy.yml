@@ -1,0 +1,7 @@
+# rust-llm-tidy config for the action repo.
+#
+# This repo follows upstream rust-llm-tidy, so every rule runs on every
+# allowed file and nothing is excluded. Whitelisting all ops also opts
+# code languages (Python) into `fences`, which the default run skips.
+include:
+  - rules: [tables, fences, links, reorder, vis, lints]
