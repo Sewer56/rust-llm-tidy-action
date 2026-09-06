@@ -451,7 +451,11 @@ runs:
     #                          working tree (no push, no comment, no fail).
     #
     # Failure comments are only possible on a pull request (no PR/issue
-    # otherwise).
+    # otherwise). On PRs the run also maintains the findings report: one
+    # sticky comment with the current committed findings, plus a compact
+    # added/cleared follow-up after meaningful changes (see
+    # scripts/sticky_publish.py). Reporting is best-effort and never
+    # changes the job outcome.
     - name: Run rust-llm-tidy
       id: tidy
       shell: bash
@@ -467,6 +471,11 @@ runs:
         # PR head SHA (github.sha is the merge commit on PR events); comment
         # links pin to the exact commit the run linted, immune to later pushes.
         RLT_BLOB_BASE: ${{ github.server_url }}/${{ github.repository }}/blob/${{ github.event.pull_request.head.sha || github.sha }}/
+        # The committed revision the findings report describes; on failed
+        # pushes and check-mode failures the report is collected from this
+        # revision, never from the mutated working tree.
+        RLT_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        RLT_VALIDATE: ${{ inputs.validate }}
         GITHUB_TOKEN: ${{ github.token }}
       run: |
         set -euo pipefail
@@ -489,6 +498,43 @@ runs:
 
         # Files this run changed (the fixes), if any.
         files="$( { git diff --name-only HEAD || true; git ls-files --others --exclude-standard; } | sort -u )"
+
+        # ── Findings report helpers (PRs only) ───────────────
+        # Both are best-effort: a reporting problem warns and never changes
+        # the exit status below. Validate runs collect no findings, so they
+        # skip reporting entirely.
+        publish_report() {
+          # $1: findings JSON document, $2: revision the findings describe.
+          # ${RLT_VALIDATE:-false}: the action always exports the env, but
+          # the script also runs standalone in the repo's script harness.
+          if [ "${RLT_VALIDATE:-false}" = "true" ]; then
+            return 0
+          fi
+          python3 "${{ github.action_path }}/scripts/sticky_publish.py" \
+            --findings "$1" \
+            --revision "$2" \
+            --repository "${GITHUB_REPOSITORY:-}" \
+            --pr "$PR_NUMBER" \
+            --server-url "${GITHUB_SERVER_URL:-https://github.com}" \
+            || echo "::warning::rust-llm-tidy: could not publish the findings report" >&2
+        }
+
+        collect_head_findings() {
+          # Findings for the revision the PR actually points at. The main
+          # run already edited the working tree (check-mode failure or a
+          # failed apply push), so re-collect read-only: a temporary
+          # detached worktree at the PR head, tidy run in --dry-run mode
+          # with the same arguments. Output lands in rlt-head-run.json.
+          if [ "${RLT_VALIDATE:-false}" = "true" ]; then
+            return 1
+          fi
+          python3 "${{ github.action_path }}/scripts/head_view.py" \
+            --repository-dir . \
+            --revision "${RLT_HEAD_SHA:-$(git rev-parse HEAD)}" \
+            --args-file "$RUNNER_TEMP/rlt-args" \
+            --binary "$RLT_BIN" \
+            --output "$RUNNER_TEMP/rlt-head-run.json"
+        }
 
         # Nothing changed on disk. This also happens for dry-run, which reports
         # the changes a transformation would make (`severity: "success"`
@@ -513,6 +559,12 @@ runs:
                 || echo "::warning::rust-llm-tidy: could not post report comment" >&2
             fi
           fi
+          # Clean tree: the run's findings already describe the committed
+          # PR head, whatever the exit status (hints and warnings do
+          # not fail the run but still belong in the report).
+          if [ "$IS_PR" = "true" ]; then
+            publish_report "$RUNNER_TEMP/rlt-run.json" "$(git rev-parse HEAD)"
+          fi
           exit "$TIDY_RC"
         fi
 
@@ -531,6 +583,9 @@ runs:
 
           # Plain GITHUB_TOKEN can't write a fork's PR branch, so push fails.
           if git push origin "HEAD:refs/heads/$HEAD_REF"; then
+            # The findings describe the pushed fix commit's content exactly,
+            # so the report publishes at the new revision.
+            publish_report "$RUNNER_TEMP/rlt-run.json" "$(git rev-parse HEAD)"
             exit 0
           fi
 
@@ -545,6 +600,12 @@ runs:
           } > "$RUNNER_TEMP/rlt-comment.md"
           gh pr comment "$PR_NUMBER" --body-file "$RUNNER_TEMP/rlt-comment.md" \
             || echo "::warning::rust-llm-tidy: could not post failure comment" >&2
+          # The fix commit never reached the PR branch, so the report must
+          # describe the PR head, not the local fixes.
+          if collect_head_findings; then
+            publish_report "$RUNNER_TEMP/rlt-head-run.json" \
+              "${RLT_HEAD_SHA:-$(git rev-parse HEAD)}"
+          fi
           echo "::error::rust-llm-tidy: apply tidied files but could not push" >&2
           exit 1
         fi
@@ -574,6 +635,12 @@ runs:
             fi
             gh pr comment "$PR_NUMBER" --body-file "$RUNNER_TEMP/rlt-comment.md" \
               || echo "::warning::rust-llm-tidy: could not post comment" >&2
+            # Check mode leaves its fixes uncommitted in the tree; the
+            # report describes the committed PR head instead.
+            if collect_head_findings; then
+              publish_report "$RUNNER_TEMP/rlt-head-run.json" \
+                "${RLT_HEAD_SHA:-$(git rev-parse HEAD)}"
+            fi
           fi
           echo "::error::rust-llm-tidy: working tree is not tidy" >&2
           printf '%s\n' "$files" >&2

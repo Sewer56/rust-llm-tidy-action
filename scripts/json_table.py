@@ -4,19 +4,27 @@
 Reads the JSON array of records that `rust-llm-tidy --output-mode json`
 writes to stdout (the file path is argv[1]) and prints Markdown to stdout.
 
-- Lint findings (`severity` `error`/`warning`) render as finding entries
-  grouped by severity, errors first: one bullet per finding with the code,
-  a short title, a `path:line` location, and the message. Sentences after
-  the first in a message render as sub-bullets, so multi-sentence guidance
-  (DOC007, DOC008) stays readable.
+- Lint findings (`severity` `error`/`warning`/`hint`) render as
+  finding entries grouped by severity, errors first: one bullet per
+  finding with the code, a short title, a `path:line` location, and the
+  message. Sentences after the first in a message render as sub-bullets,
+  so multi-sentence guidance (DOC007, DOC008) stays readable. Hints
+  are suggestions for an LLM or human to investigate (e.g. a possible
+  pre-allocation); they render as their own trailing section so
+  they stay visually separate from the gating severities.
 - Change records (`severity: "success"`) render as a "Changes" table.
+
+Records from older binaries (no `title`, no hint severity, a `0` or
+`null` line) render through the same paths.
 
 Locations link to the immutable blob at the commit the run linted when
 `RLT_BLOB_BASE` is set to an `.../blob/<sha>/` URL prefix (the action
-passes the PR head SHA); without it they render as plain code text. Link
-text and destination are escaped so an untrusted repo path cannot inject
-markdown into the comment body. Change records without a line (table and
-link fixes) show `-` in the Changes table.
+passes the PR head SHA), or when a caller passes `base` explicitly -
+the sticky report does that to pin each finding to the revision it was
+actually observed at. Without a base they render as plain code text.
+Link text and destination are escaped so an untrusted repo path cannot
+inject markdown into the comment body. Change records without a line
+(table and link fixes) show `-` in the Changes table.
 
 Change-table cells derived from unconstrained source text (the change
 message) have their pipes turned into `&#124;` entities so they cannot
@@ -75,17 +83,20 @@ def escape_link_text(text):
     return text.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
 
 
-def location(path, line):
-    """Markdown `path:line` location, linked when `RLT_BLOB_BASE` is set.
+def location(path, line, base=None):
+    """Markdown `path:line` location, linked when a blob base is given.
 
-    The link targets `<RLT_BLOB_BASE><path>#L<line>`; callers pass a
+    The link targets `<base>/<path>#L<line>`; callers pass a
     `/blob/<sha>/` prefix so the link stays pinned to the commit the run
     linted and survives later pushes. Link text is escaped and the
     destination angle-bracketed so an untrusted path cannot break out of
-    either. Without the prefix the location renders as plain code text.
+    either. `base` defaults to `RLT_BLOB_BASE` from the environment;
+    an empty base renders the location as plain code text.
     """
     text = f"{path}:{line}" if line else path
-    base = os.environ.get("RLT_BLOB_BASE", "").rstrip("/")
+    if base is None:
+        base = os.environ.get("RLT_BLOB_BASE", "")
+    base = base.rstrip("/")
     if not base:
         return f"`{text}`"
     url = f"{base}/{quote(path)}"
@@ -107,7 +118,7 @@ def split_guidance(message):
     return parts[0], parts[1:]
 
 
-def finding_lines(record):
+def finding_lines(record, base=None):
     """Markdown lines for one lint finding: bullet, summary, sub-bullets."""
     code = record.get("code", "")
     # Record title first; missing/null/empty falls through to the map, and
@@ -126,17 +137,17 @@ def finding_lines(record):
         message += f" ({record.get('item_kind', '')} `{name}`)"
 
     summary, guidance = split_guidance(message)
-    lines = [f"- **`{code}` {title}** - {location(path, record.get('line'))}"]
+    lines = [f"- **`{code}` {title}** - {location(path, record.get('line'), base)}"]
     lines.append(f"  {summary}")
     lines.extend(f"  - {part}" for part in guidance)
     return lines
 
 
-def counts_line(errors, warnings, changes):
-    """`N errors, M warnings, K changes.` over the non-zero groups only."""
+def counts_line(errors, warnings, hints, changes):
+    """`N errors, M warnings, K hints, C changes.` over non-zero groups."""
     parts = []
     for count, noun in ((errors, "error"), (warnings, "warning"),
-                        (changes, "change")):
+                        (hints, "hint"), (changes, "change")):
         if count:
             parts.append(f"{count} {noun}" + ("" if count == 1 else "s"))
     return ", ".join(parts) + "."
@@ -155,10 +166,12 @@ def main(json_path):
 
     errors = [d for d in records if d.get("severity") == "error"]
     warnings = [d for d in records if d.get("severity") == "warning"]
+    hints = [d for d in records if d.get("severity") == "hint"]
     changes = [d for d in records if d.get("severity") == "success"]
 
-    out = [counts_line(len(errors), len(warnings), len(changes))]
-    for header, group in (("Errors", errors), ("Warnings", warnings)):
+    out = [counts_line(len(errors), len(warnings), len(hints), len(changes))]
+    for header, group in (("Errors", errors), ("Warnings", warnings),
+                          ("Hints - consider looking at these", hints)):
         if not group:
             continue
         out.append("")

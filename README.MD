@@ -265,7 +265,7 @@ Lineless fixes (table, link) show `-`:
 ```markdown
 ## rust-llm-tidy: not tidy
 
-1 error, 1 warning, 1 change.
+1 error, 1 warning, 1 hint, 1 change.
 
 ### Errors
 
@@ -280,6 +280,12 @@ Lineless fixes (table, link) show `-`:
   line 9 is 95 chars long, over the 80-char limit.
   - Split it at the nearest idea change with a blank line;
   - code-block lines count too.
+
+### Hints - consider looking at these
+
+- **`DOC004` missing `# Arguments` section** -
+  [src/app.rs:40](<<repo>/blob/<sha>/src/app.rs#L40>)
+  consider pre-allocating the buffer.
 
 ### Changes
 
