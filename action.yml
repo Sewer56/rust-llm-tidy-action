@@ -520,11 +520,9 @@ runs:
         }
 
         collect_head_findings() {
-          # Findings for the revision the PR actually points at. The main
-          # run already edited the working tree (check-mode failure or a
-          # failed apply push), so re-collect read-only: a temporary
-          # detached worktree at the PR head, tidy run in --dry-run mode
-          # with the same arguments. Output lands in rlt-head-run.json.
+          # Report the PR's committed code, not local fixes that never reached
+          # GitHub. head_view.py scans a temporary checkout without editing it
+          # and writes rlt-head-run.json. See that script for isolation details.
           if [ "${RLT_VALIDATE:-false}" = "true" ]; then
             return 1
           fi

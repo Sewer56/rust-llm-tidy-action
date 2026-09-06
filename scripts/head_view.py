@@ -1,33 +1,39 @@
 #!/usr/bin/env python3
-"""Collect the committed PR-head findings without touching the checkout.
+"""Scan the PR's committed code without changing the runner's checkout.
 
-After a check-mode failure or a failed apply push, the working tree holds
-uncommitted tidy fixes, so the main run's findings describe content the PR
-does not have. This helper re-collects findings for the revision the PR
-actually points at:
+Local fixes are not necessarily on GitHub:
 
-- a temporary detached `git worktree` is checked out at that revision
-  (the main checkout and its dirty files are never touched);
-- the tidy binary runs there in read-only `--dry-run` mode from the same
-  project subdirectory the main run used (`--repository-dir` may sit
-  below the repository root), reusing the exact argument list (paths,
-  config, filters), so the comparison sees the same files, rules and
-  record paths;
-- stdout must parse as the tool's JSON document; anything else (worktree
-  failure, project-directory resolution failure, spawn failure, missing or
-  unparseable output, or a `.gitmodules` at the collected revision, whose
-  submodule content the worktree cannot cover without fetching
-  PR-controlled URLs) exits non-zero and the caller skips publication
-  rather than reporting findings that were never collected.
+- Check mode leaves fixes uncommitted in the runner's checkout.
+- A failed apply push leaves a local fix commit that never reached the PR.
 
-CLI:
+The report must describe the PR branch's latest commit, called its head,
+not those local fixes.
+
+This script creates a temporary checkout using `git worktree`.
+It scans the requested commit with `--dry-run`.
+The runner's existing checkout stays untouched.
+
+# Usage
+
   head_view.py --repository-dir DIR --revision SHA --args-file PATH
       --binary PATH --output PATH
 
-The arguments file holds the main run's NUL-terminated argv (the action's
-arguments step writes it); `--dry-run` is appended here. `--revision`
-must be a plain hex commit id so it can never be mistaken for a git
-option.
+- `--repository-dir`: the main run's project directory, possibly below repo root
+- `--revision`: a hexadecimal commit ID, never a branch name or Git option
+- `--args-file`: the main run's arguments, separated and terminated by NUL bytes
+- `--binary`: the rust-llm-tidy executable
+- `--output`: destination for the collected JSON record list
+
+The scan reuses the saved arguments and matching project subdirectory,
+with `--dry-run` appended.
+
+# Remarks
+
+A revision containing `.gitmodules` is rejected: fetching PR-controlled
+submodule URLs is unsafe, and skipping submodules could falsely clear findings.
+
+Collection failures exit nonzero so the caller skips publication, rather
+than treating missing results as an all-clear report.
 """
 
 import argparse
@@ -43,10 +49,86 @@ _REVISION = re.compile(r"^[0-9a-fA-F]{4,64}$")
 
 
 def _git(repository_dir, *argv):
-    """One git call; the completed process (never raises)."""
+    """Run Git and capture its output without raising for a nonzero exit."""
     return subprocess.run(
         ["git", "-C", repository_dir, *argv], capture_output=True, text=True
     )
+
+
+def _scan_worktree(args, worktree):
+    """Write findings from the temporary checkout; return 1 when collection fails.
+
+    Run from the matching project subdirectory so relative paths keep their meaning.
+    A nonzero tidy exit is acceptable if stdout contains a JSON record list.
+    """
+    # Never fetch PR-controlled submodule URLs. Missing submodule files could
+    # make existing findings look fixed, so reject an incomplete checkout.
+    if os.path.exists(os.path.join(worktree, ".gitmodules")):
+        print(
+            "::warning::rust-llm-tidy: head view cannot cover"
+            " submodules; skipping report publication",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        with open(args.args_file, "rb") as argument_file:
+            saved_args = [
+                chunk.decode("utf-8")
+                for chunk in argument_file.read().split(b"\0")
+                if chunk
+            ]
+    except OSError as exc:
+        print(
+            f"::warning::rust-llm-tidy: unreadable arguments file: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+
+    prefix = _git(args.repository_dir, "rev-parse", "--show-prefix")
+    if prefix.returncode != 0:
+        print(
+            "::warning::rust-llm-tidy: could not resolve the project"
+            " directory for the head view",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        run = subprocess.run(
+            [args.binary, *saved_args, "--dry-run"],
+            cwd=os.path.join(worktree, prefix.stdout.strip()),
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        print(
+            f"::warning::rust-llm-tidy: could not run the tidy binary: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Remaining findings can cause a nonzero exit. Validate the output instead.
+    try:
+        records = json.loads(run.stdout)
+    except ValueError:
+        print(
+            "::warning::rust-llm-tidy: head view produced no JSON document;"
+            " skipping report publication",
+            file=sys.stderr,
+        )
+        return 1
+    if not isinstance(records, list):
+        print(
+            "::warning::rust-llm-tidy: head view document is not a record"
+            " list; skipping report publication",
+            file=sys.stderr,
+        )
+        return 1
+
+    with open(args.output, "w", encoding="utf-8") as output_file:
+        json.dump(records, output_file)
+    return 0
 
 
 def main(argv=None):
@@ -68,8 +150,10 @@ def main(argv=None):
     scratch = tempfile.mkdtemp(prefix="rlt-head-view-")
     worktree = f"{scratch}/w"
     try:
-        added = _git(args.repository_dir, "worktree", "add", "--detach", "--quiet",
-                     worktree, args.revision)
+        added = _git(
+            args.repository_dir, "worktree", "add", "--detach", "--quiet",
+            worktree, args.revision,
+        )
         if added.returncode != 0:
             print(
                 f"::warning::rust-llm-tidy: could not create the head view:"
@@ -78,80 +162,12 @@ def main(argv=None):
             )
             return 1
         try:
-            # Deliberately no `git submodule update --init` here: the
-            # `.gitmodules` at the PR head is PR-controlled and alone
-            # selects which URL the runner would fetch. Without the init
-            # the worktree holds no submodule content, so a repository
-            # that lints inside submodules would yield a partial document
-            # (its findings would later read as cleared); fail closed
-            # instead of collecting an incomplete view.
-            if os.path.exists(os.path.join(worktree, ".gitmodules")):
-                print(
-                    "::warning::rust-llm-tidy: head view cannot cover"
-                    " submodules; skipping report publication",
-                    file=sys.stderr,
-                )
-                return 1
-
-            try:
-                with open(args.args_file, "rb") as fh:
-                    saved = [chunk.decode("utf-8") for chunk in fh.read().split(b"\0")
-                             if chunk]
-            except OSError as exc:
-                print(f"::warning::rust-llm-tidy: unreadable arguments file: {exc}",
-                      file=sys.stderr)
-                return 1
-
-            # Saved paths are relative to the main run's project
-            # directory, so the worktree run must start from the matching
-            # subdirectory or the collected document is rooted at the
-            # wrong directory.
-            prefix = _git(args.repository_dir, "rev-parse", "--show-prefix")
-            if prefix.returncode != 0:
-                print(
-                    "::warning::rust-llm-tidy: could not resolve the project"
-                    " directory for the head view",
-                    file=sys.stderr,
-                )
-                return 1
-
-            try:
-                run = subprocess.run(
-                    [args.binary, *saved, "--dry-run"],
-                    cwd=os.path.join(worktree, prefix.stdout.strip()),
-                    capture_output=True, text=True,
-                )
-            except OSError as exc:
-                print(f"::warning::rust-llm-tidy: could not run the tidy binary: {exc}",
-                      file=sys.stderr)
-                return 1
-
-            # A non-zero exit means findings remain; that is a valid
-            # collected document. Only an unusable document is a failure.
-            try:
-                records = json.loads(run.stdout)
-            except ValueError:
-                print(
-                    "::warning::rust-llm-tidy: head view produced no JSON document;"
-                    " skipping report publication",
-                    file=sys.stderr,
-                )
-                return 1
-            if not isinstance(records, list):
-                print(
-                    "::warning::rust-llm-tidy: head view document is not a record"
-                    " list; skipping report publication",
-                    file=sys.stderr,
-                )
-                return 1
-            with open(args.output, "w", encoding="utf-8") as fh:
-                json.dump(records, fh)
+            return _scan_worktree(args, worktree)
         finally:
             _git(args.repository_dir, "worktree", "remove", "--force", worktree)
             _git(args.repository_dir, "worktree", "prune")
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
-    return 0
 
 
 if __name__ == "__main__":

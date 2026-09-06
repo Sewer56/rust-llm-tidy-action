@@ -1,9 +1,10 @@
 """Run-script wiring: which document and revision each outcome publishes.
 
-Executes the real "Run rust-llm-tidy" script extracted from action.yml
-against a local git repository with a real bare remote, a recording `gh`
-stub and a stub tidy binary - the same shape as the action repository's
-CI harness, runnable offline. Asserts the publication wiring end to end:
+Runs the "Run rust-llm-tidy" script extracted from action.yml offline.
+Fixtures match the CI harness: a local Git repository, bare remote,
+recording `gh` stub, and stub tidy binary.
+
+Asserts the publication wiring end to end:
 
 - a successful apply push publishes the run document at the pushed
   revision, with no change-report flood on first publication;
@@ -32,9 +33,10 @@ ACTION_DIR = Path(__file__).resolve().parents[2]
 SERVER = "https://github.test"
 
 # `gh api` stub: answers the sticky-publish REST surfaces offline and
-# records every invocation. The PR head mirrors the remote branch (what
-# the run pushed or the fixture set up), falling back to RLT_HEAD_SHA and
-# then HEAD, so the entry/stale gates see a realistic remote.
+# records every invocation.
+#
+# The PR head follows the remote branch, then RLT_HEAD_SHA, then HEAD.
+# This lets revision checks observe commits pushed by the run or fixture.
 GH_STUB = """#!/usr/bin/env bash
 if [ "$1" = "api" ]; then
   printf '%s\\n' "$*" >> "__API_LOG__"
@@ -58,9 +60,9 @@ exit 0
 
 # Tidy stub: the mutating mode rewrites lib.rs to the tidy form and
 # reports a mutated-tree finding; --dry-run (the head view) reports the
-# file's committed first line without touching anything. The distinct
-# messages let the tests tell the run document from the head-view
-# document apart.
+# file's committed first line without touching anything.
+#
+# Distinct messages identify whether a report used local or committed code.
 TIDY_STUB = """#!/usr/bin/env bash
 for a in "$@"; do [ "$a" = "--dry-run" ] && dry=1; done
 if [ "${dry:-0}" = 1 ]; then

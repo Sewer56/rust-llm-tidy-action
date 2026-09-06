@@ -17,7 +17,7 @@ Use cases:
 How a binary is obtained:
 
 1. **`prebuilt`** (default) - downloads a prebuilt release artifact (see
-   [Releases](#releases)).
+   [Releases]).
 2. **`git`** - builds `rust-llm-tidy-cli` from a source checkout: the current
    repository by default (the vendored submodule layout), or a pinned remote
    checkout.
@@ -100,8 +100,9 @@ On success, `apply` pushes with the message
 
 Both modes post a PR comment on failure, listing the offending/fixed files. To
 allow those comments (and `apply`'s push to a same-repo PR branch), grant the
-job `contents: write` and `pull-requests: write`. `check` needs
-`pull-requests: write` to comment.
+job `contents: write` and `pull-requests: write`.
+
+`check` needs `pull-requests: write` to comment.
 
 ### PR check
 
@@ -321,3 +322,4 @@ Apache-2.0, matching [`rust-llm-tidy`][rust-llm-tidy].
 [release-repo]: https://github.com/Sewer56/rust-llm-tidy/releases
 [config]: https://github.com/Sewer56/rust-llm-tidy#configuration
 [7zip]: https://github.com/ip7z/7zip
+[Releases]: #releases

@@ -1,43 +1,46 @@
 #!/usr/bin/env python3
-"""Publish the sticky findings report and compact change reports to a PR.
+"""Maintain a PR findings report and post summaries of changes.
 
-The PR carries one sticky comment holding the current findings: errors,
-warnings and hints as severity sections (hints separate from the
-other severities) plus a hidden snapshot of exactly what was published.
-A fresh run compares its findings against that snapshot; unchanged
-findings keep their stored, revision-pinned links, and added/cleared
-findings render as one compact follow-up comment linking back to the
-sticky. Nothing is posted when nothing meaningfully changed.
+The "sticky" report is a comment updated in place, not recreated every run.
+It groups errors, warnings, and hints separately.
+It also stores a hidden snapshot for the next comparison.
 
-Publication is authenticated state handling, not marker matching:
+Unchanged findings keep links to their original commits.
+Added or cleared findings get a separate, compact follow-up comment.
+Unchanged results need no comment, unless duplicate reports need consolidation.
 
-- A comment counts as owned only when it carries the snapshot marker AND
-  its author is an expected bot identity (the configured login, plus the
-  token's authenticated login when `/user` resolves).
-- The PR's current head must still equal the revision the run describes;
-  a stale run never overwrites newer state.
-- The snapshot is base64-encoded JSON inside an HTML comment, so finding
-  text (paths, messages) cannot break out of it or inject markup.
+# Publication safeguards
 
-Delivery is best-effort with bounded retries and no exactly-once
-guarantee: a lost follow-up comment costs a comment, never the recorded
-state. Failed collection is not an empty success: a missing or invalid
-findings document skips publication rather than reporting all clear. A
-snapshot that does not fit the comment budget is stored as an explicit
-overflow marker, and the next run re-baselines instead of diffing
-against a truncated list, so omitted findings are never reported as
-cleared.
+- Ownership: updates require the snapshot marker and an accepted bot author.
+- Authors: configured logins plus the token's login, if `/user` resolves.
+- Revision: check the PR's latest commit matches the scan before writing.
+- Encoding: base64 JSON keeps finding text inside the hidden HTML comment.
+- Failed scan: skip publication instead of reporting all-clear.
+- Size limit: mark oversized snapshots as overflow to avoid false clearances.
 
-CLI:
+# Usage
+
   sticky_publish.py --findings <run.json> --revision <sha>
       [--repository owner/name] [--pr N] [--server-url URL]
       [--login NAME]...
 
-Env fallbacks: `GITHUB_REPOSITORY`, `PR_NUMBER`, `GITHUB_SERVER_URL`,
-`RLT_STICKY_LOGIN` (accepted bot identity when set; otherwise
-`github-actions[bot]`). The action runs this script from its "Run
-rust-llm-tidy" step; it exits 0 whenever the outcome was handled
-(best-effort), 2 on usage errors.
+Environment fallbacks:
+- `GITHUB_REPOSITORY`: repository in owner/name form
+- `PR_NUMBER`: pull request number
+- `GITHUB_SERVER_URL`: server URL, defaulting to https://github.com
+- `RLT_STICKY_LOGIN`: accepted bot login, defaulting to `github-actions[bot]`
+
+# Remarks
+
+Delivery uses bounded retries, but does not guarantee exactly-once comments.
+The snapshot is saved first, so a failed follow-up does not lose findings.
+
+After snapshot overflow, the next run saves a new baseline.
+It does not report changes against the incomplete history.
+
+Exit status:
+- `0`: outcome handled, including a publication failure
+- `2`: missing required arguments or invalid repository, PR number, or revision
 """
 
 import argparse
@@ -59,8 +62,9 @@ SCHEMA_VERSION = 1
 
 # Conservative payload budget. GitHub documents a 65,536-character issue
 # comment limit; staying clearly under it leaves room for transport
-# overhead. This is a conservative bound, not a measured repository
-# limit. Visible bullets yield remaining budget to the snapshot first:
+# overhead. This is a conservative bound, not a measured repository limit.
+#
+# Visible bullets yield remaining budget to the snapshot first:
 # state integrity outranks display.
 MAX_COMMENT_CHARS = 60_000
 
@@ -136,7 +140,9 @@ def _append_bounded(lines, sections, visible_budget):
     """Append `(header, bullets)` sections to `lines`, truncated to fit.
 
     `visible_budget` is the exact join length the appended lines may grow
-    `lines` to. Every line - headers included - is accounted at its real
+    `lines` to.
+
+    Every line - headers included - is accounted at its real
     join cost (separator plus text), so the returned hidden count is the
     only thing the caller must still make room for.
     """
@@ -225,6 +231,7 @@ def _sticky_body(entries, state, overflow, server_url, repository, budget):
 
     # The snapshot claims its budget first (the exact join cost of the
     # closing blank line plus snapshot line); only bullets are truncated.
+    #
     # Room for the truncation note is reserved at its widest count so
     # appending it can never push the body past `budget`.
     snapshot = encode_state(state)

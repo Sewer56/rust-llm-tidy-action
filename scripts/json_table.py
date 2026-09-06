@@ -4,24 +4,21 @@
 Reads the JSON array of records that `rust-llm-tidy --output-mode json`
 writes to stdout (the file path is argv[1]) and prints Markdown to stdout.
 
-- Lint findings (`severity` `error`/`warning`/`hint`) render as
-  finding entries grouped by severity, errors first: one bullet per
-  finding with the code, a short title, a `path:line` location, and the
-  message. Sentences after the first in a message render as sub-bullets,
-  so multi-sentence guidance (DOC007, DOC008) stays readable. Hints
-  are suggestions for an LLM or human to investigate (e.g. a possible
-  pre-allocation); they render as their own trailing section so
-  they stay visually separate from the gating severities.
+- Findings: group `error`, `warning`, and `hint` records in that order.
+- Bullets: show each finding's code, title, `path:line` location, and message.
+- Guidance: split later message sentences into sub-bullets for readability.
+- Hints: show suggestions to investigate in a separate trailing section.
 - Change records (`severity: "success"`) render as a "Changes" table.
 
 Records from older binaries (no `title`, no hint severity, a `0` or
 `null` line) render through the same paths.
 
-Locations link to the immutable blob at the commit the run linted when
-`RLT_BLOB_BASE` is set to an `.../blob/<sha>/` URL prefix (the action
-passes the PR head SHA), or when a caller passes `base` explicitly -
-the sticky report does that to pin each finding to the revision it was
-actually observed at. Without a base they render as plain code text.
+Location links use an `.../blob/<sha>/` URL prefix to identify an exact commit:
+
+- Explicit `base`: used by the sticky report for each finding's original commit.
+- `RLT_BLOB_BASE`: environment fallback, set by the action to the PR head SHA.
+- No base: render the location as plain code text.
+
 Link text and destination are escaped so an untrusted repo path cannot
 inject markdown into the comment body. Change records without a line
 (table and link fixes) show `-` in the Changes table.
@@ -29,9 +26,10 @@ inject markdown into the comment body. Change records without a line
 Change-table cells derived from unconstrained source text (the change
 message) have their pipes turned into `&#124;` entities so they cannot
 split a table cell or inject content into the PR comment body; other
-fields are rendered as-is. Prints nothing when the file is missing,
-unparseable, or contains no records, so the caller falls back to its
-plain file list.
+fields are rendered as-is.
+
+Prints nothing when the file is missing, unparseable, or contains no records.
+The caller then falls back to its plain file list.
 """
 import json
 import os
@@ -41,11 +39,13 @@ from urllib.parse import quote
 
 # Compatibility fallback: short human titles per lint code, used only when a
 # record carries no `title` of its own. Newer rust-llm-tidy binaries emit a
-# friendly `title` on every lint record, but this action's default
-# `binary-source: prebuilt` mode runs released binaries that predate the
-# field and never emit it. finding_lines resolves the bullet title as the
-# record's `title`, then this map, then the raw code; the map is retained
-# because the action does not enforce a minimum binary version.
+# friendly `title` on every lint record.
+#
+# The default `binary-source: prebuilt` mode can run older releases
+# that do not emit titles.
+#
+# finding_lines tries the record's `title`, then this map, then the raw code.
+# Keep the map because the action does not enforce a minimum binary version.
 TITLES = {
     "DOC001": "missing documentation",
     "DOC002": "missing `# Errors` section",
@@ -62,11 +62,9 @@ TITLES = {
 def fmt_line(raw):
     """Column text for a change record's line.
 
-    Records that carry a line render it as-is; records with no specific
-    line (an absent, `null`, or empty value - the CLI serializes a missing
-    line as `null`, e.g. for link and table fixes) render `-` so the
-    reader can tell "no line" from line 1..n. A numeric `0` is also
-    tolerated (older binaries emitted it as the no-line sentinel).
+    Missing, null, empty, or zero values render as `-`; other values stay as-is.
+    The CLI uses null for fixes without a line, such as link and table fixes.
+    Older binaries used zero instead.
     """
     return "-" if not raw else raw
 
@@ -88,8 +86,10 @@ def location(path, line, base=None):
 
     The link targets `<base>/<path>#L<line>`; callers pass a
     `/blob/<sha>/` prefix so the link stays pinned to the commit the run
-    linted and survives later pushes. Link text is escaped and the
-    destination angle-bracketed so an untrusted path cannot break out of
+    linted and survives later pushes.
+
+    Link text is escaped and the destination angle-bracketed
+    so an untrusted path cannot break out of
     either. `base` defaults to `RLT_BLOB_BASE` from the environment;
     an empty base renders the location as plain code text.
     """

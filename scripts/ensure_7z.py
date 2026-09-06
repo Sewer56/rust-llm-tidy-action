@@ -10,7 +10,7 @@ Reads GitHub-Action-style env inputs:
       apt           Linux only: require p7zip-full already installed (no download)
       preinstalled  require 7z/7zz on the runner (no download)
   RUNNER_OS / RUNNER_ARCH - current runner platform
-  RUNNER_TEMP      - scratch dir; extracted 7-Zip goes to $RUNNER_TEMP/sevenzip-bin,
+  RUNNER_TEMP      - extracted 7-Zip goes to $RUNNER_TEMP/sevenzip-bin,
                      downloaded archives to $RUNNER_TEMP/sevenzip-bin-src
   GITHUB_TOKEN     - optional token for the GitHub API (higher rate limits)
 

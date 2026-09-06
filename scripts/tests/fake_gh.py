@@ -1,11 +1,13 @@
 """Shared fixtures for the action's offline script tests.
 
 `FakeTransport` is an in-memory stand-in for `gh_api.GhApi`: it serves the
-small REST surface `sticky_publish` uses, records every request as
-`(method, path, body)` in `.calls`, and can script HTTP failures per
-`(method, substring)` as a popping list of statuses. `finding()` builds
-record dicts in the CLI's JSON shape (old-binaries variant: omit the
-optional fields).
+small REST surface `sticky_publish` uses.
+
+- Requests are recorded as `(method, path, body)` in `.calls`.
+- Failures are scripted as status lists per `(method, substring)`.
+
+`finding()` builds records in the CLI's JSON shape.
+Omit optional fields to simulate records from older binaries.
 """
 
 import re
