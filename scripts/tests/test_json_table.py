@@ -45,7 +45,11 @@ class JsonTableTests(unittest.TestCase):
         # Hints keep the shared bullet shape and land last.
         self.assertLess(out.index("### Warnings"),
                         out.index("### Hints - consider looking at these"))
-        self.assertIn("**`DOC999` missing documentation** - `src/app.rs:40`", out)
+        expected = (
+            "**[`DOC999`](https://github.com/Sewer56/rust-llm-tidy/blob/main"
+            "/docs/lints.md#codes) missing documentation** - `src/app.rs:40`"
+        )
+        self.assertIn(expected, out)
         self.assertIn("consider pre-allocating the buffer", out)
 
     def test_hint_only_document_renders_counts_and_section(self):
@@ -66,7 +70,11 @@ class JsonTableTests(unittest.TestCase):
         ]
         out = render(records)
         # The TITLES map supplies the title older binaries never emitted.
-        self.assertIn("**`DOC001` missing documentation** - `src/lib.rs:5`", out)
+        self.assertIn(
+            "**[`DOC001`](https://github.com/Sewer56/rust-llm-tidy/blob/main"
+            "/docs/lints.md#codes) missing documentation** - `src/lib.rs:5`",
+            out,
+        )
         self.assertIn("missing doc comment", out)
 
     def test_nothing_prints_for_unusable_documents(self):

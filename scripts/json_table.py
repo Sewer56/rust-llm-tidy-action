@@ -6,6 +6,7 @@ writes to stdout (the file path is argv[1]) and prints Markdown to stdout.
 
 - Findings: group `error`, `warning`, and `hint` records in that order.
 - Bullets: show each finding's code, title, `path:line` location, and message.
+  The code links to the docs lints table (`LINT_CODES_URL`).
 - Guidance: split later message sentences into sub-bullets for readability.
 - Hints: show suggestions to investigate in a separate trailing section.
 - Change records (`severity: "success"`) render as a "Changes" table.
@@ -36,6 +37,10 @@ import os
 import re
 import sys
 from urllib.parse import quote
+
+LINT_CODES_URL = (
+    "https://github.com/Sewer56/rust-llm-tidy/blob/main/docs/lints.md#codes"
+)
 
 # Compatibility fallback: short human titles per lint code, used only when a
 # record carries no `title` of its own. Newer rust-llm-tidy binaries emit a
@@ -137,7 +142,9 @@ def finding_lines(record, base=None):
         message += f" ({record.get('item_kind', '')} `{name}`)"
 
     summary, guidance = split_guidance(message)
-    lines = [f"- **`{code}` {title}** - {location(path, record.get('line'), base)}"]
+    # Codes are emitted by rust-llm-tidy itself, so they need no escaping.
+    code_text = f"[`{code}`]({LINT_CODES_URL})" if code else f"`{code}`"
+    lines = [f"- **{code_text} {title}** - {location(path, record.get('line'), base)}"]
     lines.append(f"  {summary}")
     lines.extend(f"  - {part}" for part in guidance)
     return lines

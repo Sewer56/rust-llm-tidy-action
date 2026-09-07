@@ -257,9 +257,40 @@ A downloaded 7-Zip is cached in `$RUNNER_TEMP/sevenzip-bin`; enable
 
 ### PR comments
 
-The action comments on the PR only on failure, in one of two ways:
+The action maintains a sticky findings report and posts separate
+failure comments.
 
-**1. Not tidy** - lint findings, job fails. Findings group by severity,
+#### Sticky findings report
+
+Updated in place when findings change, including on successful runs.
+Unchanged findings retain their original commit links.
+Example preview (file locations are illustrative):
+
+> ## rust-llm-tidy: current findings
+>
+> 1 error, 1 warning.
+>
+> ### Errors
+> - **[`DOC002`][lints-docs] missing `# Errors` section** - `src/main.rs:12`
+>
+> ### Warnings
+> - **[`DOC008`][lints-docs] long line** - `src/lib.rs:9`
+
+Added or cleared findings get a follow-up; unchanged results stay quiet.
+Clearing all findings shows “No current findings.”
+
+#### Per-run comments
+
+**Already tidy** - no per-run comment. With no findings, an existing sticky
+report shows:
+
+> ## rust-llm-tidy: current findings
+>
+> No current findings.
+
+No sticky report is created when there are no findings.
+
+**Not tidy** - lint findings, job fails. Findings group by severity,
 one bullet each; recorded changes (e.g. `dry-run`) follow as a table.
 Lineless fixes (table, link) show `-`:
 
@@ -270,13 +301,13 @@ Lineless fixes (table, link) show `-`:
 
 ### Errors
 
-- **`DOC002` missing `# Errors` section** -
+- **[`DOC002`](https://github.com/Sewer56/rust-llm-tidy/blob/main/docs/lints.md#codes) missing `# Errors` section** -
   [src/main.rs:12](<<repo>/blob/<sha>/src/main.rs#L12>)
   pub fn returning Result is missing a `# Errors` doc section (fn `load`)
 
 ### Warnings
 
-- **`DOC008` long line** -
+- **[`DOC008`](https://github.com/Sewer56/rust-llm-tidy/blob/main/docs/lints.md#codes) long line** -
   [src/lib.rs:9](<<repo>/blob/<sha>/src/lib.rs#L9>)
   line 9 is 95 chars long, over the 80-char limit.
   - Split it at the nearest idea change with a blank line;
@@ -284,7 +315,7 @@ Lineless fixes (table, link) show `-`:
 
 ### Hints - consider looking at these
 
-- **`DOC004` missing `# Arguments` section** -
+- **[`DOC004`](https://github.com/Sewer56/rust-llm-tidy/blob/main/docs/lints.md#codes) missing `# Arguments` section** -
   [src/app.rs:40](<<repo>/blob/<sha>/src/app.rs#L40>)
   consider pre-allocating the buffer.
 
@@ -297,7 +328,7 @@ Lineless fixes (table, link) show `-`:
 
 Links pin the PR head SHA, so they stay valid after later pushes.
 
-**2. Could not push fixes** - `mode: apply` tidied but could not push (fork PR
+**Could not push fixes** - `mode: apply` tidied but could not push (fork PR
 or token without write access). Job fails:
 
 ```markdown
@@ -323,3 +354,4 @@ Apache-2.0, matching [`rust-llm-tidy`][rust-llm-tidy].
 [config]: https://github.com/Sewer56/rust-llm-tidy#configuration
 [7zip]: https://github.com/ip7z/7zip
 [Releases]: #releases
+[lints-docs]: https://github.com/Sewer56/rust-llm-tidy/blob/main/docs/lints.md#codes
