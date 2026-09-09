@@ -179,6 +179,8 @@ class RunScriptTests(unittest.TestCase):
         )
         script_env.pop("RLT_HEAD_SHA", None)
         script_env.pop("RLT_PUSH_FAIL", None)
+        script_env.pop("RUST_LLM_TIDY_DIFF_BASE", None)
+        script_env.pop("RLT_PR_BASE", None)
         script_env.update(env)
         return subprocess.run(
             ["bash", str(self.run_script)], cwd=self.repo, env=script_env,
@@ -279,6 +281,49 @@ class RunScriptTests(unittest.TestCase):
                                  GITHUB_REPOSITORY="not a repo")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("could not publish the findings report", result.stderr)
+
+    def test_run_should_supply_baseline_when_pr_context_is_available(self):
+        baseline_log = self.temp / "baseline"
+        write_stub(self.tidy_hint, '''#!/usr/bin/env bash
+printf '%s' "${RUST_LLM_TIDY_DIFF_BASE-unset}" > "$RUNNER_TEMP/baseline"
+printf '[]\n'
+''')
+        cases = (
+            ("pr_default", "true", "pr-base", None, "pr-base"),
+            ("pr_override", "true", "pr-base", "custom", "custom"),
+            ("pr_empty_override", "true", "pr-base", "", "pr-base"),
+            ("non_pr", "false", "pr-base", None, "unset"),
+            ("non_pr_override", "false", "", "custom", "custom"),
+            ("missing_base", "true", "", None, "unset"),
+        )
+
+        for name, is_pr, base, override, expected in cases:
+            with self.subTest(name=name):
+                env = dict(IS_PR=is_pr, RLT_PR_BASE=base,
+                           RLT_BIN=str(self.tidy_hint), RLT_VALIDATE="true")
+                if override is not None:
+                    env["RUST_LLM_TIDY_DIFF_BASE"] = override
+
+                result = self.run_action(**env)
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(baseline_log.read_text(), expected)
+
+    def test_head_recollection_should_inherit_pr_baseline_when_check_fails(self):
+        head_sha = self.untidy_commit_on_feature()
+        script = TIDY_STUB.replace(
+            'for a in "$@";',
+            'printf "%s\\n" "${RUST_LLM_TIDY_DIFF_BASE-unset}" '
+            '>> "$RUNNER_TEMP/baselines"\nfor a in "$@";',
+        )
+        write_stub(self.tidy, script)
+
+        result = self.run_action(MODE="check", RLT_HEAD_SHA=head_sha,
+                                 RLT_PR_BASE=head_sha)
+
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual((self.temp / "baselines").read_text().splitlines(),
+                         [head_sha, head_sha])
 
 
 if __name__ == "__main__":

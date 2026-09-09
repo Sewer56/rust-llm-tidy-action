@@ -481,6 +481,7 @@ runs:
         RLT_BIN: ${{ steps.binary.outputs.path }}
         MODE: ${{ inputs.mode }}
         IS_PR: ${{ github.event_name == 'pull_request' }}
+        RLT_PR_BASE: ${{ github.event.pull_request.base.sha }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
         HEAD_REF: ${{ github.head_ref }}
         COMMIT_NAME: github-actions[bot]
@@ -496,6 +497,13 @@ runs:
         GITHUB_TOKEN: ${{ github.token }}
       run: |
         set -euo pipefail
+
+        # Share the PR baseline with the main run and committed-head recollection.
+        # Older binaries ignore this environment variable; explicit overrides win.
+        if [ "$IS_PR" = "true" ] && [ -n "${RLT_PR_BASE:-}" ] && \
+           [ -z "${RUST_LLM_TIDY_DIFF_BASE:-}" ]; then
+          export RUST_LLM_TIDY_DIFF_BASE="$RLT_PR_BASE"
+        fi
 
         args=()
         if [ -f "$RUNNER_TEMP/rlt-args" ]; then
