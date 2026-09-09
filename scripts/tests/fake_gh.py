@@ -7,7 +7,6 @@ small REST surface `sticky_publish` uses.
 - Failures are scripted as status lists per `(method, substring)`.
 
 `finding()` builds records in the CLI's JSON shape.
-Omit optional fields to simulate records from older binaries.
 """
 
 import re
@@ -31,20 +30,16 @@ def finding(severity="error", code="DOC001", path="src/lib.rs", line=3,
             message="non-private item is missing a doc comment",
             item_kind="fn", item_name="hello", title="missing documentation"):
     """One lint-finding record in the CLI's JSON document shape."""
-    record = {
+    return {
         "severity": severity,
         "code": code,
         "path": path,
         "line": line,
         "message": message,
+        "item_kind": item_kind,
+        "item_name": item_name,
+        "title": title,
     }
-    if item_kind is not None:
-        record["item_kind"] = item_kind
-    if item_name is not None:
-        record["item_name"] = item_name
-    if title is not None:
-        record["title"] = title
-    return record
 
 
 class FakeTransport:

@@ -83,9 +83,9 @@ def _run(config):
 def _share_baseline(config, parsed):
     """Export the PR baseline and make each diff base resolvable.
 
-    Older binaries ignore the variable; explicit overrides win, and an
-    empty override is replaced like an unset one. The baseline helper
-    makes the merge-base resolvable without changing the checkout.
+    Explicit overrides win; an unset or empty override falls back to the
+    PR base. The baseline helper makes the merge-base resolvable without
+    changing the checkout.
 
     The helper runs here once, before argv building and the head-view
     rescan reuse the base.

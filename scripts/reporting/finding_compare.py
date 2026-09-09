@@ -17,14 +17,11 @@ import json
 from collections import Counter
 
 # Lint-finding severities the report tracks. Change records
-# (`severity: "success"`) and unknown severities never enter comparisons;
-# older binaries that emit only `error`/`warning` records are covered by
-# the same filter.
+# (`severity: "success"`) and unknown severities never enter comparisons.
 FINDING_SEVERITIES = ("error", "warning", "hint", "reminder")
 
 # Identity fields: everything a finding reports except its line (location
-# moves are not changes) and its title (presentation only, absent from
-# older records).
+# moves are not changes) and its title (presentation only).
 _IDENTITY_FIELDS = ("severity", "code", "path", "message", "item_kind", "item_name")
 
 

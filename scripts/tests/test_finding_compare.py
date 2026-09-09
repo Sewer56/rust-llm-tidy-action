@@ -104,7 +104,7 @@ class MergeTests(unittest.TestCase):
 
     def test_title_only_differences_are_not_changes(self):
         old = [finding(title="missing documentation")]
-        new = [finding(title=None)]  # old binaries emit no title field
+        new = [finding(title="updated documentation title")]
         retained, added, cleared = merge(old, new)
         self.assertEqual((len(retained), len(added), len(cleared)), (1, 0, 0))
 
@@ -118,11 +118,6 @@ class MergeTests(unittest.TestCase):
 
         retained, added, cleared = merge(current, [])
         self.assertEqual((len(retained), len(added), len(cleared)), (0, 0, 2))
-
-    def test_legacy_records_without_optional_fields_compare_as_equal(self):
-        legacy = [finding(item_kind=None, item_name=None, title=None)]
-        retained, added, cleared = merge(legacy, legacy)
-        self.assertEqual((len(retained), len(added), len(cleared)), (1, 0, 0))
 
 
 if __name__ == "__main__":

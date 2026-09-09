@@ -13,9 +13,6 @@ writes (the file path is the argument) and renders Markdown:
 - Reminders: note their default changed-line scope in a separate section.
 - Change records (`severity: "success"`) render as a "Changes" table.
 
-Records from older binaries (no `title`, no hint severity, a `0` or
-`null` line) render through the same paths.
-
 Location links use an `.../blob/<sha>/` URL prefix to identify an exact commit:
 
 - Explicit `base`: used by the sticky report for each finding's original commit.
@@ -50,34 +47,12 @@ FINDING_SECTIONS = (
     ("reminder", "Reminders - changed lines by default"),
 )
 
-# Compatibility fallback: short human titles per lint code, used only when a
-# record carries no `title` of its own. Newer rust-llm-tidy binaries emit a
-# friendly `title` on every lint record.
-#
-# The default `binary-source: prebuilt` mode can run older releases
-# that do not emit titles.
-#
-# finding_lines tries the record's `title`, then this map, then the raw code.
-# Keep the map because the action does not enforce a minimum binary version.
-TITLES = {
-    "DOC001": "missing documentation",
-    "DOC002": "missing `# Errors` section",
-    "DOC003": "vague `# Errors` section",
-    "DOC004": "missing `# Arguments` section",
-    "DOC005": "undocumented parameter",
-    "DOC006": "placeholder text",
-    "DOC007": "oversized paragraph",
-    "DOC008": "long line",
-    "TEST001": "non-behavioral test name",
-}
-
 
 def fmt_line(raw):
     """Column text for a change record's line.
 
     Missing, null, empty, or zero values render as `-`; other values stay as-is.
     The CLI uses null for fixes without a line, such as link and table fixes.
-    Older binaries used zero instead.
     """
     return "-" if not raw else raw
 
@@ -134,9 +109,8 @@ def split_guidance(message):
 def finding_lines(record, base=None):
     """Markdown lines for one lint finding: bullet, summary, sub-bullets."""
     code = record.get("code", "")
-    # Record title first; missing/null/empty falls through to the map, and
-    # an unknown code falls through to the raw code (never renders empty).
-    title = record.get("title") or TITLES.get(code) or code
+    # Stored snapshots may predate producer-owned titles.
+    title = record.get("title") or code
     path = record.get("path", "")
 
     # DOC007/DOC008 messages repeat the location as a `path: ` prefix;

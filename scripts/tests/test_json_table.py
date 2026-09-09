@@ -89,19 +89,21 @@ class JsonTableTests(unittest.TestCase):
         self.assertNotIn("### Warnings", out)
         self.assertEqual(out.count("### Hints - consider looking at these"), 1)
 
-    def test_legacy_records_render_without_optional_fields(self):
+    def test_report_should_render_unnamed_findings_with_producer_titles(self):
         records = [
-            finding(item_kind=None, item_name=None, title=None, line=5,
+            finding(item_name=None, title="producer title", line=5,
                     message="missing doc comment"),
         ]
+
         out = render(records)
-        # The TITLES map supplies the title older binaries never emitted.
+
         self.assertIn(
             "**[`DOC001`](https://github.com/Sewer56/rust-llm-tidy/blob/main"
-            "/docs/lints.md#codes) missing documentation** - `src/lib.rs:5`",
+            "/docs/lints.md#codes) producer title** - `src/lib.rs:5`",
             out,
         )
         self.assertIn("missing doc comment", out)
+        self.assertNotIn("`None`", out)
 
     def test_nothing_prints_for_unusable_documents(self):
         with tempfile.TemporaryDirectory() as tmp:
