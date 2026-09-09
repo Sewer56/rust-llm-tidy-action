@@ -112,8 +112,6 @@ files the PR changes are evaluated, and the job fails if any are not tidy:
 ```yaml
 steps:
   - uses: actions/checkout@v6
-    with:
-      fetch-depth: 0   # full history so the PR base diff is resolvable
 
   - uses: Sewer56/rust-llm-tidy-action@v1
     with:
