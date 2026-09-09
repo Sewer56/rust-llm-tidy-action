@@ -136,9 +136,10 @@ inputs:
       'apply' tidies files in place; on a pull request it also commits and
       pushes the fixes to the PR branch, and if that push is impossible (fork
       PR / read-only token) it posts a PR comment listing the fixed files and
-      fails. 'check' fails the job when files are not already tidy (mutation
-      is left in place for inspection). On failure a PR comment listing the
-      offending/fixed files is posted.
+      fails. 'check' uses --dry-run and fails on proposed edits or lint errors;
+      external formatters are skipped. PR runs require a clean checkout
+      (validate runs exempt). When check reports proposed edits or lint
+      errors, it attempts to post a PR comment.
     required: false
     default: "apply"
   config-path:
@@ -367,117 +368,28 @@ runs:
           printf 'path=rust-llm-tidy\n' >> "$GITHUB_OUTPUT"
         fi
 
-    # ── Tidy arguments ───────────────────────────────────────
-    - name: Build rust-llm-tidy arguments
-      id: args
-      shell: bash
-      working-directory: ${{ inputs.rust-project-path }}
-      env:
-        RLT_CONFIG_PATH: ${{ inputs.config-path }}
-        RLT_INCLUDE: ${{ inputs.include }}
-        RLT_EXCLUDE: ${{ inputs.exclude }}
-        RLT_PATH_LIST: ${{ inputs.paths }}
-        RLT_DEFAULT_FILES: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}
-        RLT_CHANGED_FILES: ${{ inputs.changed-files }}
-      run: |
-        set -euo pipefail
-        args=()
-
-        if [ "${{ inputs.validate }}" = "true" ]; then
-          args+=(--validate)
-        else
-          if [ "${{ inputs.no-config }}" = "true" ]; then
-            args+=(--no-config)
-          elif [ -n "$RLT_CONFIG_PATH" ]; then
-            args+=(--config "$RLT_CONFIG_PATH")
-          fi
-
-          # The action consumes lint findings and recorded changes from JSON
-          # only. Both real and dry-run runs emit one JSON document (dry-run
-          # reports the changes a transformation would make instead of editing),
-          # so request JSON output unconditionally here.
-          args+=(--output-mode json)
-
-          if [ "${{ inputs.dry-run }}" = "true" ]; then
-            args+=(--dry-run)
-          fi
-
-          if [ -n "$RLT_INCLUDE" ]; then
-            while IFS= read -r r; do
-              r="$(printf '%s' "$r" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-              [ -n "$r" ] && args+=(--include "$r")
-            done <<< "$(printf '%s' "$RLT_INCLUDE" | tr ',;' '\n')"
-          fi
-
-          if [ -n "$RLT_EXCLUDE" ]; then
-            while IFS= read -r r; do
-              r="$(printf '%s' "$r" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-              [ -n "$r" ] && args+=(--exclude "$r")
-            done <<< "$(printf '%s' "$RLT_EXCLUDE" | tr ',;' '\n')"
-          fi
-
-          paths=()
-          if [ -n "$RLT_PATH_LIST" ]; then
-            # Explicit paths win.
-            while IFS= read -r p; do
-              p="$(printf '%s' "$p" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-              [ -n "$p" ] && paths+=("$p")
-            done <<< "$RLT_PATH_LIST"
-          elif [ "$RLT_CHANGED_FILES" = "true" ]; then
-            # Tidy only the files changed by this PR (vs its base).
-            if [ -n "$RLT_DEFAULT_FILES" ]; then
-              base="$RLT_DEFAULT_FILES"
-              bash "${{ github.action_path }}/scripts/ensure_diff_base.sh" "$base"
-              if ! git diff --name-only -z --diff-filter=ACMR "$base"...HEAD > "$RUNNER_TEMP/rlt-changed-files"; then
-                echo "::error::changed-files: could not compare PR base $base with HEAD" >&2
-                exit 1
-              fi
-
-              # bash 3.2 (macOS runners) has no mapfile.
-              changed=()
-              while IFS= read -r -d '' p; do
-                changed+=("$p")
-              done < "$RUNNER_TEMP/rlt-changed-files"
-              paths=("${changed[@]}")
-            else
-              # Non-PR (push/workflow_dispatch): let the CLI use the
-              # working-tree git diff (no path args).
-              paths=()
-            fi
-          else
-            # Whole rust-project-path.
-            paths=(".")
-          fi
-
-          args+=("${paths[@]}")
-        fi
-
-        printf '%s\0' "${args[@]}" > "$RUNNER_TEMP/rlt-args"
-
-    # ── Run ──────────────────────────────────────────────────
-    # One block does everything: run tidy, then (if the tree changed) decide
-    # what to do by mode and event:
-    #
-    #   apply + PR          -> commit + push the fixes; an impossible push
-    #                          (fork PR) posts a comment listing the fixed
-    #                          files and fails.
-    #   check + dirty       -> comment (PR) listing the offending files, fail.
-    #   apply (non-PR)      -> old behaviour: mutate, leave the changes in the
-    #                          working tree (no push, no comment, no fail).
-    #
-    # Failure comments are only possible on a pull request (no PR/issue
-    # otherwise). On PRs the run also maintains the findings report: one
-    # sticky comment with the current committed findings, plus a compact
-    # added/cleared follow-up after meaningful changes (see
-    # scripts/sticky_publish.py). Reporting is best-effort and never
-    # changes the job outcome.
+    # ── Run ──────────────────────────────────────────
+    # Builds the tidy argv from the inputs, runs it, and drives the PR
+    # workflow. Check reports without editing. Apply pushes PR fixes or
+    # leaves non-PR edits.
     - name: Run rust-llm-tidy
       id: tidy
       shell: bash
       working-directory: ${{ inputs.rust-project-path }}
       env:
         RLT_BIN: ${{ steps.binary.outputs.path }}
-        MODE: ${{ inputs.mode }}
+        # ── Tidy invocation inputs ───────────────────────
+        RLT_MODE: ${{ inputs.mode }}
+        RLT_VALIDATE: ${{ inputs.validate }}
+        RLT_NO_CONFIG: ${{ inputs.no-config }}
+        RLT_DRY_RUN: ${{ inputs.dry-run }}
+        RLT_CONFIG_PATH: ${{ inputs.config-path }}
+        RLT_INCLUDE: ${{ inputs.include }}
+        RLT_EXCLUDE: ${{ inputs.exclude }}
+        RLT_PATH_LIST: ${{ inputs.paths }}
+        RLT_DEFAULT_FILES: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}
+        RLT_CHANGED_FILES: ${{ inputs.changed-files }}
+        # ── PR context ───────────────────────────────────
         IS_PR: ${{ github.event_name == 'pull_request' }}
         RLT_PR_BASE: ${{ github.event.pull_request.base.sha }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -487,194 +399,7 @@ runs:
         # PR head SHA (github.sha is the merge commit on PR events); comment
         # links pin to the exact commit the run linted, immune to later pushes.
         RLT_BLOB_BASE: ${{ github.server_url }}/${{ github.repository }}/blob/${{ github.event.pull_request.head.sha || github.sha }}/
-        # The committed revision the findings report describes; on failed
-        # pushes and check-mode failures the report is collected from this
-        # revision, never from the mutated working tree.
+        # Failed pushes recollect this committed revision.
         RLT_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        RLT_VALIDATE: ${{ inputs.validate }}
         GITHUB_TOKEN: ${{ github.token }}
-      run: |
-        set -euo pipefail
-
-        # Share the PR baseline with the main run and committed-head recollection.
-        # Older binaries ignore this environment variable; explicit overrides win.
-        if [ "$IS_PR" = "true" ] && [ -n "${RLT_PR_BASE:-}" ] && \
-           [ -z "${RUST_LLM_TIDY_DIFF_BASE:-}" ]; then
-          export RUST_LLM_TIDY_DIFF_BASE="$RLT_PR_BASE"
-        fi
-
-        if [ "${RLT_VALIDATE:-false}" != "true" ] && [ -n "${RUST_LLM_TIDY_DIFF_BASE:-}" ]; then
-          bash "${{ github.action_path }}/scripts/ensure_diff_base.sh" "$RUST_LLM_TIDY_DIFF_BASE"
-        fi
-
-        args=()
-        if [ -f "$RUNNER_TEMP/rlt-args" ]; then
-          while IFS= read -r -d '' a; do
-            args+=("$a")
-          done < "$RUNNER_TEMP/rlt-args"
-        fi
-
-        # Keep a copy of the run's stdout so the PR comment can show why each
-        # file failed (the JSON document). tee preserves console output. stderr
-        # is also tee'd to a file as a debugging aid. The tool exits non-zero
-        # when lints remain, so capture (not die); wait reaps/tees so
-        # rlt-run.json is complete before it is read below.
-        "$RLT_BIN" "${args[@]}" > >(tee "$RUNNER_TEMP/rlt-run.json") 2> >(tee "$RUNNER_TEMP/rlt-run.err" >&2) || TIDY_RC=$?
-        TIDY_RC="${TIDY_RC:-0}"
-        wait || true    # flush tee; propagate failures nowhere
-
-        # Files this run changed (the fixes), if any.
-        files="$( { git diff --name-only HEAD || true; git ls-files --others --exclude-standard; } | sort -u )"
-
-        # ── Findings report helpers (PRs only) ───────────────
-        # Both are best-effort: a reporting problem warns and never changes
-        # the exit status below. Validate runs collect no findings, so they
-        # skip reporting entirely.
-        publish_report() {
-          # $1: findings JSON document, $2: revision the findings describe.
-          # ${RLT_VALIDATE:-false}: the action always exports the env, but
-          # the script also runs standalone in the repo's script harness.
-          if [ "${RLT_VALIDATE:-false}" = "true" ]; then
-            return 0
-          fi
-          python3 "${{ github.action_path }}/scripts/sticky_publish.py" \
-            --findings "$1" \
-            --revision "$2" \
-            --repository "${GITHUB_REPOSITORY:-}" \
-            --pr "$PR_NUMBER" \
-            --server-url "${GITHUB_SERVER_URL:-https://github.com}" \
-            || echo "::warning::rust-llm-tidy: could not publish the findings report" >&2
-        }
-
-        collect_head_findings() {
-          # Report the PR's committed code, not local fixes that never reached
-          # GitHub. head_view.py scans a temporary checkout without editing it
-          # and writes rlt-head-run.json. See that script for isolation details.
-          if [ "${RLT_VALIDATE:-false}" = "true" ]; then
-            return 1
-          fi
-          python3 "${{ github.action_path }}/scripts/head_view.py" \
-            --repository-dir . \
-            --revision "${RLT_HEAD_SHA:-$(git rev-parse HEAD)}" \
-            --args-file "$RUNNER_TEMP/rlt-args" \
-            --binary "$RLT_BIN" \
-            --output "$RUNNER_TEMP/rlt-head-run.json"
-        }
-
-        # Nothing changed on disk. This also happens for dry-run, which reports
-        # the changes a transformation would make (`severity: "success"`
-        # records) without editing the tree, and for non-mutating lint-only
-        # failures. A failing run comments with whatever json_table.py rendered
-        # (finding sections and/or "Changes" table) so the PR shows why it is
-        # red.
-        # Then pass the tool's status through.
-        if [ -z "$files" ]; then
-          if [ "$IS_PR" = "true" ] && [ "$TIDY_RC" -ne 0 ]; then
-            if [ -f "$RUNNER_TEMP/rlt-run.json" ]; then
-              table="$(
-                python3 "${{ github.action_path }}/scripts/json_table.py" \
-                  "$RUNNER_TEMP/rlt-run.json"
-              )"
-            fi
-            if [ -n "${table:-}" ]; then
-              { echo "## rust-llm-tidy: not tidy"; echo ""
-                printf '%s\n' "$table"
-              } > "$RUNNER_TEMP/rlt-comment.md"
-              gh pr comment "$PR_NUMBER" --body-file "$RUNNER_TEMP/rlt-comment.md" \
-                || echo "::warning::rust-llm-tidy: could not post report comment" >&2
-            fi
-          fi
-          # Clean tree: the run's findings already describe the committed
-          # PR head, whatever the exit status (hints and warnings do
-          # not fail the run but still belong in the report).
-          if [ "$IS_PR" = "true" ]; then
-            publish_report "$RUNNER_TEMP/rlt-run.json" "$(git rev-parse HEAD)"
-          fi
-          exit "$TIDY_RC"
-        fi
-
-        printf '%s\n' "$files" > "$RUNNER_TEMP/rlt-fixed-files"
-        list="$(printf '%s\n' "$files" | sed 's#^#  - \`#; s#$#\`#')"
-
-        # apply + PR: commit + push; on push failure comment the fixed files
-        # and fail.
-        if [ "$MODE" = "apply" ] && [ "$IS_PR" = "true" ]; then
-          # bash 3.2 (macOS runners) has no mapfile.
-          arr=()
-          while IFS= read -r f; do
-            arr+=("$f")
-          done <<< "$files"
-          git config user.name "$COMMIT_NAME"
-          git config user.email "$COMMIT_EMAIL"
-          git add -- "${arr[@]}"
-          git commit -m "Apply rust-llm-tidy fixes" \
-            -m "Automated by the rust-llm-tidy GitHub Action." >/dev/null
-
-          # Plain GITHUB_TOKEN can't write a fork's PR branch, so push fails.
-          if git push origin "HEAD:refs/heads/$HEAD_REF"; then
-            # The findings describe the pushed fix commit's content exactly,
-            # so the report publishes at the new revision.
-            publish_report "$RUNNER_TEMP/rlt-run.json" "$(git rev-parse HEAD)"
-            exit 0
-          fi
-
-          { echo "## rust-llm-tidy: could not push fixes"; echo ""
-            echo "I tidied the files below but could not push the fix commit (fork PR or the"
-            echo "token lacks write access to the PR branch)."; echo ""
-            echo "Fixed files:"
-            printf '%s\n' "$list"; echo ""
-            echo "To get the fixes applied, re-run with a token that can write to the PR branch"
-            echo "(e.g. \`permissions: contents: write\`, or a PAT on fork PRs via"
-            echo "\`pull_request_target\`)."
-          } > "$RUNNER_TEMP/rlt-comment.md"
-          gh pr comment "$PR_NUMBER" --body-file "$RUNNER_TEMP/rlt-comment.md" \
-            || echo "::warning::rust-llm-tidy: could not post failure comment" >&2
-          # The fix commit never reached the PR branch, so the report must
-          # describe the PR head, not the local fixes.
-          if collect_head_findings; then
-            publish_report "$RUNNER_TEMP/rlt-head-run.json" \
-              "${RLT_HEAD_SHA:-$(git rev-parse HEAD)}"
-          fi
-          echo "::error::rust-llm-tidy: apply tidied files but could not push" >&2
-          exit 1
-        fi
-
-        # check + dirty: comment (PR) and fail. apply (non-PR): leave changes.
-        if [ "$MODE" = "check" ] || [ "$IS_PR" = "true" ]; then
-          if [ "$IS_PR" = "true" ]; then
-            # Rendered report (finding sections and/or a "Changes" table)
-            # from the run's stdout JSON document via the JSON-to-markdown
-            # converter. Every run emits JSON (real and dry-run). Fall back
-            # to a plain list when that yields nothing.
-            if [ -f "$RUNNER_TEMP/rlt-run.json" ]; then
-              table="$(
-                python3 "${{ github.action_path }}/scripts/json_table.py" \
-                  "$RUNNER_TEMP/rlt-run.json"
-              )"
-            fi
-            if [ -n "${table:-}" ]; then
-              { echo "## rust-llm-tidy: not tidy"; echo ""
-                printf '%s\n' "$table"
-              } > "$RUNNER_TEMP/rlt-comment.md"
-            else
-              { echo "## rust-llm-tidy: not tidy"; echo ""
-                echo "These files are not tidy:"; echo ""
-                printf '%s\n' "$list"
-              } > "$RUNNER_TEMP/rlt-comment.md"
-            fi
-            gh pr comment "$PR_NUMBER" --body-file "$RUNNER_TEMP/rlt-comment.md" \
-              || echo "::warning::rust-llm-tidy: could not post comment" >&2
-            # Check mode leaves its fixes uncommitted in the tree; the
-            # report describes the committed PR head instead.
-            if collect_head_findings; then
-              publish_report "$RUNNER_TEMP/rlt-head-run.json" \
-                "${RLT_HEAD_SHA:-$(git rev-parse HEAD)}"
-            fi
-          fi
-          echo "::error::rust-llm-tidy: working tree is not tidy" >&2
-          printf '%s\n' "$files" >&2
-          exit 1
-        fi
-
-        # apply, non-PR: leave the fixes in the working tree.
-        exit "$TIDY_RC"
+      run: python3 "${{ github.action_path }}/scripts/run_tidy.py"

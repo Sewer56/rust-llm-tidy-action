@@ -20,7 +20,7 @@ from collections import Counter
 # (`severity: "success"`) and unknown severities never enter comparisons;
 # older binaries that emit only `error`/`warning` records are covered by
 # the same filter.
-FINDING_SEVERITIES = ("error", "warning", "hint")
+FINDING_SEVERITIES = ("error", "warning", "hint", "reminder")
 
 # Identity fields: everything a finding reports except its line (location
 # moves are not changes) and its title (presentation only, absent from

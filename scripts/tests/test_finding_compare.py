@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import finding_compare  # noqa: E402
+from reporting import finding_compare  # noqa: E402
 from fake_gh import finding  # noqa: E402
 
 OLD_REV = "a" * 40
@@ -48,13 +48,17 @@ class LoadRecordsTests(unittest.TestCase):
              "message": "m"},
             finding(severity="warning"),
             finding(severity="hint"),
+            finding(severity="reminder"),
             {"severity": "catastrophe", "code": "X", "path": "a.rs",
              "message": "m"},
             "not even a dict",
         ]
+
         kept = finding_compare.findings(records)
+
         self.assertEqual(
-            [record["severity"] for record in kept], ["error", "warning", "hint"]
+            [record["severity"] for record in kept],
+            ["error", "warning", "hint", "reminder"]
         )
 
 

@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """Scan the PR's committed code without changing the runner's checkout.
 
-Local fixes are not necessarily on GitHub:
+The runner's checkout does not always match the PR head:
 
-- Check mode leaves fixes uncommitted in the runner's checkout.
+- Default PR checkouts scan a merge commit whose bytes can differ
+  from the head's.
 - A failed apply push leaves a local fix commit that never reached the PR.
 
 The report must describe the PR branch's latest commit, called its head,
-not those local fixes.
+not those scans.
 
 This script creates a temporary checkout using `git worktree`.
-It scans the requested commit with `--dry-run`.
+It scans the requested commit with `--checks-only`.
 The runner's existing checkout stays untouched.
 
 # Usage
@@ -25,7 +26,7 @@ The runner's existing checkout stays untouched.
 - `--output`: destination for the collected JSON record list
 
 The scan reuses the saved arguments and matching project subdirectory,
-with `--dry-run` appended.
+with any saved `--dry-run` replaced by `--checks-only`.
 
 # Remarks
 
@@ -55,7 +56,7 @@ def _git(repository_dir, *argv):
     )
 
 
-def _scan_worktree(args, worktree):
+def _scan_worktree(repository_dir, scan_args, binary, output, worktree):
     """Write findings from the temporary checkout; return 1 when collection fails.
 
     Run from the matching project subdirectory so relative paths keep their meaning.
@@ -71,21 +72,7 @@ def _scan_worktree(args, worktree):
         )
         return 1
 
-    try:
-        with open(args.args_file, "rb") as argument_file:
-            saved_args = [
-                chunk.decode("utf-8")
-                for chunk in argument_file.read().split(b"\0")
-                if chunk
-            ]
-    except OSError as exc:
-        print(
-            f"::warning::rust-llm-tidy: unreadable arguments file: {exc}",
-            file=sys.stderr,
-        )
-        return 1
-
-    prefix = _git(args.repository_dir, "rev-parse", "--show-prefix")
+    prefix = _git(repository_dir, "rev-parse", "--show-prefix")
     if prefix.returncode != 0:
         print(
             "::warning::rust-llm-tidy: could not resolve the project"
@@ -94,9 +81,19 @@ def _scan_worktree(args, worktree):
         )
         return 1
 
+    # Findings-only rescan: --checks-only runs the lints without editing
+    # or post-processing, and its exit status stays about findings, not
+    # proposed edits.
+    #
+    # A saved --dry-run (check mode) would change that, so the rescan
+    # strips it. The flag goes before the `--` target separator so it
+    # stays a flag even when targets contain flag-shaped names.
+    split = scan_args.index("--") if "--" in scan_args else len(scan_args)
+    head = [a for a in scan_args[:split] if a != "--dry-run"]
+    scan_argv = head + ["--checks-only"] + scan_args[split:]
     try:
         run = subprocess.run(
-            [args.binary, *saved_args, "--dry-run"],
+            [binary, *scan_argv],
             cwd=os.path.join(worktree, prefix.stdout.strip()),
             capture_output=True,
             text=True,
@@ -126,7 +123,7 @@ def _scan_worktree(args, worktree):
         )
         return 1
 
-    with open(args.output, "w", encoding="utf-8") as output_file:
+    with open(output, "w", encoding="utf-8") as output_file:
         json.dump(records, output_file)
     return 0
 
@@ -140,9 +137,36 @@ def main(argv=None):
     parser.add_argument("--output", required=True, help="findings JSON to write")
     args = parser.parse_args(argv)
 
-    if not _REVISION.match(args.revision):
+    try:
+        with open(args.args_file, "rb") as argument_file:
+            saved_args = [
+                chunk.decode("utf-8")
+                for chunk in argument_file.read().split(b"\0")
+                if chunk
+            ]
+    except OSError as exc:
         print(
-            f"::warning::rust-llm-tidy: refusing non-commit revision {args.revision!r}",
+            f"::warning::rust-llm-tidy: unreadable arguments file: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+
+    return scan_revision(
+        args.repository_dir, args.revision, args.binary, args.output,
+        saved_args,
+    )
+
+
+def scan_revision(repository_dir, revision, binary, output, scan_args):
+    """Scan one committed revision in a throwaway worktree.
+
+    The internal entry point for in-process callers; `main` wraps it
+    with the NUL-separated-arguments CLI. Returns 0 only after writing
+    a record list to `output`.
+    """
+    if not _REVISION.match(revision):
+        print(
+            f"::warning::rust-llm-tidy: refusing non-commit revision {revision!r}",
             file=sys.stderr,
         )
         return 1
@@ -151,8 +175,8 @@ def main(argv=None):
     worktree = f"{scratch}/w"
     try:
         added = _git(
-            args.repository_dir, "worktree", "add", "--detach", "--quiet",
-            worktree, args.revision,
+            repository_dir, "worktree", "add", "--detach", "--quiet",
+            worktree, revision,
         )
         if added.returncode != 0:
             print(
@@ -162,10 +186,11 @@ def main(argv=None):
             )
             return 1
         try:
-            return _scan_worktree(args, worktree)
+            return _scan_worktree(repository_dir, scan_args, binary,
+                                  output, worktree)
         finally:
-            _git(args.repository_dir, "worktree", "remove", "--force", worktree)
-            _git(args.repository_dir, "worktree", "prune")
+            _git(repository_dir, "worktree", "remove", "--force", worktree)
+            _git(repository_dir, "worktree", "prune")
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
 

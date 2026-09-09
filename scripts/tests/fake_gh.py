@@ -17,7 +17,7 @@ from urllib.parse import parse_qs
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from gh_api import TransportError  # noqa: E402
+from reporting.gh_api import TransportError  # noqa: E402
 
 SERVER = "https://github.test"
 REPOSITORY = "owner/repo"

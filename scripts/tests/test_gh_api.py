@@ -10,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import gh_api  # noqa: E402
+from reporting import gh_api  # noqa: E402
 
 # Stub `gh` binaries: each records its argv to a log and answers per its
 # script. `{log}` and `{stdin}` are substituted by the installing test.

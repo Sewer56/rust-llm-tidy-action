@@ -28,6 +28,9 @@ jobs:
         run: python3 -m unittest discover -s scripts/tests -v
 
   test-prebuilt-mode:
+    env:
+      # Synthetic repositories do not contain this action repository's PR base.
+      RUST_LLM_TIDY_DIFF_BASE: HEAD
     strategy:
       fail-fast: false
       matrix:
@@ -48,8 +51,8 @@ jobs:
         run: |
           mkdir -p fixture/src
           cat > fixture/src/main.rs <<'EOF'
-          fn b() { a(); }
           fn a() {}
+          fn b() { a(); }
 
           pub fn hello() {}
           EOF
@@ -62,8 +65,9 @@ jobs:
           git init -q --bare "$RUNNER_TEMP/fixture-origin"
           git -C fixture remote add origin "$RUNNER_TEMP/fixture-origin"
 
-      - name: Run action (prebuilt, apply)
+      - name: Run action (prebuilt 0.5.0 lacks --checks-only; must fail)
         id: tidy
+        continue-on-error: true
         uses: ./
         with:
           rust-project-path: fixture
@@ -75,60 +79,21 @@ jobs:
           release-repo: Sewer56/rust-llm-tidy
           release-tag: 0.5.0
 
-      - name: Assert applied + reordered
+      - name: Assert capability failure after artifact resolution
         shell: bash
         run: |
-          test "${{ steps.tidy.outputs.binary-path }}" != ""
+          test "${{ steps.tidy.outcome }}" = "failure"
+          # The download and 7-Zip extraction still resolved a binary.
+          test -n "${{ steps.tidy.outputs.binary-path }}"
           test -n "${{ steps.tidy.outputs.sevenzip-binary }}"
-          grep -q "fn a()" fixture/src/main.rs
-          # reorder places caller b() before callee a()
-          a=$(grep -n "fn a()" fixture/src/main.rs | cut -d: -f1)
-          b=$(grep -n "fn b()" fixture/src/main.rs | cut -d: -f1)
-          test "$b" -lt "$a"
-
-      - name: Commit applied result
-        shell: bash
-        run: |
-          git -C fixture add -A
-          # PR events: the action already committed; push events: commit here.
-          git -C fixture commit -qm "applied tidy" || true
-
-      - name: Run action again (prebuilt, check mode must pass)
-        uses: ./
-        with:
-          rust-project-path: fixture
-          paths: |
-            src/main.rs
-          include: "reorder"
-          no-config: "true"
-          mode: "check"
-          release-repo: Sewer56/rust-llm-tidy
-          release-tag: 0.5.0
-
-      - name: Reintroduce untidy edit
-        shell: bash
-        run: printf 'fn b() { a(); }\nfn a() {}\n' > fixture/src/main.rs
-
-      - name: Check mode must fail on untidy
-        id: dirty
-        continue-on-error: true
-        uses: ./
-        with:
-          rust-project-path: fixture
-          paths: |
-            src/main.rs
-          include: "reorder"
-          no-config: "true"
-          mode: "check"
-          release-repo: Sewer56/rust-llm-tidy
-          release-tag: 0.5.0
-
-      - name: Assert recheck failed on untidy
-        shell: bash
-        run: test "${{ steps.dirty.outcome }}" = "failure"
+          # The unsupported binary never mutated the fixture.
+          test -z "$(git -C fixture status --porcelain)"
+          test "$(git -C fixture log -1 --format=%s)" = "untidy baseline"
 
   test-git-mode:
     runs-on: ubuntu-latest
+    env:
+      RUST_LLM_TIDY_DIFF_BASE: HEAD
     steps:
       - name: Checkout Action Repository
         uses: actions/checkout@v7
@@ -155,7 +120,7 @@ jobs:
           BIN="${{ steps.tidy.outputs.binary-path }}"
           test -n "$BIN"
           test -x "$BIN"
-          "$BIN" --help | grep -q "dry-run"
+          "$BIN" --help | grep -q -- --checks-only
 
       - name: Assert source checkout and no target/ cleaned up from workspace
         shell: bash
@@ -165,6 +130,8 @@ jobs:
 
   test-check-mode-fails-on-dirty:
     runs-on: ubuntu-latest
+    env:
+      RUST_LLM_TIDY_DIFF_BASE: HEAD
     steps:
       - name: Checkout Action Repository
         uses: actions/checkout@v7
@@ -172,7 +139,7 @@ jobs:
       - name: Keep fixture reporting off this repository's PRs
         uses: ./.github/actions/fixture-gh-stub
 
-      - name: Create clean baseline repo, then untidy edit
+      - name: Create committed untidy input
         shell: bash
         run: |
           mkdir -p fixture
@@ -183,17 +150,21 @@ jobs:
           git -C fixture config user.name ci
           git -C fixture add lib.rs
           git -C fixture commit -qm baseline
-          # working-tree edit = untidy (caller before callee is wrong order)
-          printf 'fn b() { a(); }\nfn a() {}\n' > fixture/lib.rs
+          # Callee before caller needs reordering; PR runs require clean input.
+          printf 'fn a() {}\nfn b() { a(); }\n' > fixture/lib.rs
+          git -C fixture add lib.rs
+          git -C fixture commit -qm untidy
           # Bare remote: apply mode pushes its fixes on pull_request events.
           git init -q --bare "$RUNNER_TEMP/fixture-origin"
           git -C fixture remote add origin "$RUNNER_TEMP/fixture-origin"
 
-      - name: Run action in check mode (must fail on dirty tree)
+      - name: Run action in check mode (must fail on proposed edits)
         id: dirty
         continue-on-error: true
         uses: ./
         with:
+          binary-source: "git"
+          use-source-checkout: "true"
           rust-project-path: fixture
           paths: |
             lib.rs
@@ -203,11 +174,16 @@ jobs:
 
       - name: Assert check mode failed
         shell: bash
-        run: test "${{ steps.dirty.outcome }}" = "failure"
+        run: |
+          test "${{ steps.dirty.outcome }}" = "failure"
+          test -z "$(git -C fixture status --porcelain)"
+          test "$(git -C fixture log -1 --format=%s)" = untidy
 
       - name: Apply mode declares tree tidy and check passes after
         uses: ./
         with:
+          binary-source: "git"
+          use-source-checkout: "true"
           rust-project-path: fixture
           paths: |
             lib.rs
@@ -225,6 +201,8 @@ jobs:
       - name: Re-run check mode after apply (must pass)
         uses: ./
         with:
+          binary-source: "git"
+          use-source-checkout: "true"
           rust-project-path: fixture
           paths: |
             lib.rs
@@ -265,14 +243,23 @@ jobs:
           printf 'fn other() {}\n' > fixture/other.rs
           git -C fixture add -A
           git -C fixture commit -qm baseline
-          # untidy working-tree edit (caller before callee is wrong order)
-          printf 'fn b() { a(); }\nfn a() {}\n' > fixture/lib.rs
+          # PR selection compares commits; non-PR selection uses working edits.
+          printf 'fn a() {}\nfn b() { a(); }\n' > fixture/lib.rs
+          if [ -n "$PR_BASE" ]; then
+            git -C fixture add lib.rs
+            git -C fixture commit -qm untidy
+          fi
+          cp fixture/lib.rs "$RUNNER_TEMP/expected-lib.rs"
+          cp fixture/other.rs "$RUNNER_TEMP/expected-other.rs"
+          git -C fixture rev-parse HEAD > "$RUNNER_TEMP/expected-head"
 
-      - name: Run action (changed-files, must tidy only lib.rs and fail check)
+      - name: Run action (changed-files, must report lib.rs and fail check)
         id: dirty
         continue-on-error: true
         uses: ./
         with:
+          binary-source: "git"
+          use-source-checkout: "true"
           rust-project-path: fixture
           changed-files: "true"
           include: "reorder"
@@ -283,18 +270,28 @@ jobs:
         shell: bash
         run: test "${{ steps.dirty.outcome }}" = "failure"
 
-      - name: Assert only the changed file was processed (other.rs untouched)
+      - name: Assert check preserved files and HEAD and reported only lib.rs
         shell: bash
         run: |
-          grep -q "fn other() {}" fixture/other.rs
-          grep -q "fn a() {}" fixture/lib.rs
+          cmp "$RUNNER_TEMP/expected-lib.rs" fixture/lib.rs
+          cmp "$RUNNER_TEMP/expected-other.rs" fixture/other.rs
+          test "$(git -C fixture rev-parse HEAD)" = "$(cat "$RUNNER_TEMP/expected-head")"
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          records = json.loads((Path(os.environ["RUNNER_TEMP"]) / "rlt-run.json").read_text())
+          assert any(r["severity"] == "success" for r in records), records
+          assert {Path(r["path"]).name for r in records} == {"lib.rs"}, records
+          PY
 
   test-apply-push-comment:
     runs-on: ubuntu-latest
     # Exercises the apply/check post-processing logic (commit + push + PR
     # comment + fail) which needs a PR event context a normal job does not
-    # have. Runs the action's real "Run rust-llm-tidy" script (extracted from
-    # action.yml) against a real local git remote, with a stub `gh`.
+    # have. Runs the action's real run entrypoint (scripts/run_tidy.py)
+    # against a real local git remote, with a stub `gh`.
     steps:
       - name: Checkout Action Repository
         uses: actions/checkout@v7
@@ -332,10 +329,23 @@ jobs:
           # The "tidy" tool: rewrites lib.rs to the tidy form (reorder) and
           # emits a lint finding on stdout as a JSON array, exactly like the
           # real CLI's `--output-mode json`. RLT_STUB_RC simulates the real
-          # CLI exiting non-zero when lints remain.
+          # CLI exiting non-zero when lints remain. --help answers the
+          # capability probe; --dry-run and --checks-only scans never edit.
           cat > "$RUNNER_TEMP/bin/tidy" <<'SH'
           #!/usr/bin/env bash
-          printf 'fn main() { init(); }\nfn init() {}\n' > lib.rs
+          if [ "$1" = "--help" ]; then
+            printf '%s\n' "      --checks-only    Run only lint checks"
+            exit 0
+          fi
+          printf '%s\n' "$*" >> "$RUNNER_TEMP/tidy-calls"
+          dry=false
+          for arg in "$@"; do
+            if [ "$arg" = "--dry-run" ] || [ "$arg" = "--checks-only" ]; then dry=true; fi
+          done
+          if [ "$dry" = false ]; then
+            printf 'fn main() { init(); }\nfn init() {}\n' > lib.rs
+          fi
+
           printf '%s\n' '[{"path":"lib.rs","line":1,"severity":"error","code":"DOC001","message":"non-private item | note missing a doc comment","item_kind":"fn","item_name":"hello"}]'
           exit "${RLT_STUB_RC:-0}"
           SH
@@ -344,6 +354,10 @@ jobs:
           # to prove it stays escaped in the comment) and does NOT edit files.
           cat > "$RUNNER_TEMP/bin/tidy-dry-run" <<'SH'
           #!/usr/bin/env bash
+          if [ "$1" = "--help" ]; then
+            printf '%s\n' "      --checks-only    Run only lint checks"
+            exit 0
+          fi
           printf '%s\n' '[{"path":"lib.rs","line":1,"severity":"success","code":"REORDER","message":"rearrange fn a_main | from pos 2 to pos 1 (before b_helper)","item_kind":"fn","item_name":"a_main","from":2,"to":1,"before_name":"b_helper"}]'
           exit "${RLT_STUB_RC:-0}"
           SH
@@ -351,6 +365,10 @@ jobs:
           # JSON doc, so an already-tidy PR exits clean without commenting.
           cat > "$RUNNER_TEMP/bin/tidy-clean" <<'SH'
           #!/usr/bin/env bash
+          if [ "$1" = "--help" ]; then
+            printf '%s\n' "      --checks-only    Run only lint checks"
+            exit 0
+          fi
           printf 'fn main() { init(); }\nfn init() {}\n' > lib.rs
           printf '%s\n' '[]'
           exit "${RLT_STUB_RC:-0}"
@@ -362,6 +380,10 @@ jobs:
           # report grep proves the renderer prefers the record's own title.
           cat > "$RUNNER_TEMP/bin/tidy-docgap" <<'SH'
           #!/usr/bin/env bash
+          if [ "$1" = "--help" ]; then
+            printf '%s\n' "      --checks-only    Run only lint checks"
+            exit 0
+          fi
           printf '%s\n' '[{"path":"lib.rs","line":1,"severity":"error","code":"DOC001","message":"missing doc comment for `hello`","item_kind":"fn","item_name":"hello","title":"record-sourced title"}]'
           exit "${RLT_STUB_RC:-1}"
           SH
@@ -373,32 +395,18 @@ jobs:
           # (the bullet never renders an empty title).
           cat > "$RUNNER_TEMP/bin/tidy-fallback" <<'SH'
           #!/usr/bin/env bash
+          if [ "$1" = "--help" ]; then
+            printf '%s\n' "      --checks-only    Run only lint checks"
+            exit 0
+          fi
           printf '%s\n' '[{"path":"lib.rs","line":1,"severity":"error","code":"DOC001","message":"non-private item is missing a doc comment","item_kind":"fn","item_name":"hello","title":""},{"path":"lib.rs","line":2,"severity":"warning","code":"DOC009","message":"future lint says fix it","item_kind":"fn","item_name":null}]'
           exit "${RLT_STUB_RC:-1}"
           SH
           chmod +x "$RUNNER_TEMP/bin/gh" "$RUNNER_TEMP/bin/tidy" "$RUNNER_TEMP/bin/tidy-dry-run" "$RUNNER_TEMP/bin/tidy-clean" "$RUNNER_TEMP/bin/tidy-docgap" "$RUNNER_TEMP/bin/tidy-fallback"
 
-      - name: Extract run script + create fixture repo
+      - name: Create fixture repo
         shell: bash
         run: |
-          # Build the github.action_path needle from parts: written
-          # literally, this workflow's evaluator would substitute it (empty)
-          # before bash runs. Resolved to this checkout (PWD).
-          python3 - <<'PY'
-          import os
-          import yaml
-          d = yaml.safe_load(open('action.yml'))
-          src = next(s['run'] for s in d['runs']['steps'] if s.get('id') == 'tidy')
-          needle = "$" + "{{ github.action_path }}"
-          text = "\n".join(
-              line[8:] if line.startswith(" " * 8) else line
-              for line in src.split("\n")
-          )
-          text = text.replace(needle, os.getcwd())
-          path = os.path.join(os.environ["RUNNER_TEMP"], "run_dedent.sh")
-          open(path, "w").write(text)
-          PY
-
           git init -q --bare "$RUNNER_TEMP/origin"
           git init -q "$RUNNER_TEMP/repo"
           git -C "$RUNNER_TEMP/repo" config user.email ci@test
@@ -411,11 +419,11 @@ jobs:
           git -C "$RUNNER_TEMP/repo" commit -qm tidy-base
           git -C "$RUNNER_TEMP/repo" tag tidy-base
 
-      - name: apply + PR, push succeeds (expect commit + exit 0)
+      - name: apply + PR, push succeeds with remaining lint (expect commit + exit 1)
         shell: bash
         run: |
           cd "$RUNNER_TEMP/repo"
-          printf 'fn b() { a(); }\nfn a() {}\n' > lib.rs
+          printf 'fn a() {}\nfn b() { a(); }\n' > lib.rs
           git add -A; git commit -qm untidy
           git push -q origin HEAD:refs/heads/feature
 
@@ -424,14 +432,16 @@ jobs:
           export PATH="$RUNNER_TEMP/bin:$PATH"
           # The pre-push PR head, as the real action always exports it.
           export RLT_HEAD_SHA="$(git rev-parse HEAD)"
-          export MODE=apply IS_PR=true PR_NUMBER=7 HEAD_REF=feature
+          export RLT_MODE=apply IS_PR=true PR_NUMBER=7 HEAD_REF=feature
           export COMMIT_NAME=bot COMMIT_EMAIL=b@b GITHUB_TOKEN=x RLT_BIN="$RUNNER_TEMP/bin/tidy"
-          bash "$RUNNER_TEMP/run_dedent.sh"
-          rc=$?
-          echo "exit=$rc (expect 0)"
-          test "$rc" = 0
+          rc=0
+          RLT_STUB_RC=1 python3 "$GITHUB_WORKSPACE/scripts/run_tidy.py" || rc=$?
+          echo "exit=$rc (expect 1)"
+          test "$rc" = 1
           test ! -f "$RUNNER_TEMP/rlt-comment.md"   # success: no comment
           git fetch -q origin && git -C . rev-parse --verify origin/feature >/dev/null
+          test "$(git rev-parse HEAD)" != "$RLT_HEAD_SHA"
+          test "$(git rev-parse HEAD)" = "$(git rev-parse origin/feature)"
           # The findings report publishes once, at the pushed revision
           # (never the stale pre-push head in RLT_HEAD_SHA).
           posts="$(grep -c -- '--method POST' "$RUNNER_TEMP/gh-api.log" || true)"
@@ -443,7 +453,7 @@ jobs:
         shell: bash
         run: |
           cd "$RUNNER_TEMP/repo"
-          printf 'fn b() { a(); }\nfn a() {}\n' > lib.rs
+          printf 'fn a() {}\nfn b() { a(); }\n' > lib.rs
           git add -A; git commit -qm untidy2
           # stub git: reject the push. Resolve real git so the stub can exec it.
           REAL_GIT="$(readlink -f "$(command -v git)")"
@@ -458,17 +468,15 @@ jobs:
 
           # The PR head this run reports on: untidy2, pushed so the
           # remote (and the stub's PR head) match it; the run's own push
-          # below then fails. The head view needs the run's argv file
-          # (normally written by the args step).
+          # below then fails.
           git push -q origin HEAD:refs/heads/feature
           export RLT_HEAD_SHA="$(git rev-parse HEAD)"
-          printf '%s\0' --output-mode json . > "$RUNNER_TEMP/rlt-args"
           rm -f "$RUNNER_TEMP/gh-api.log" "$RUNNER_TEMP/gh-api-body.json"
           export PATH="$RUNNER_TEMP/bin:$PATH"
-          export MODE=apply IS_PR=true PR_NUMBER=7 HEAD_REF=feature
+          export RLT_MODE=apply IS_PR=true PR_NUMBER=7 HEAD_REF=feature
           export COMMIT_NAME=bot COMMIT_EMAIL=b@b GITHUB_TOKEN=x
           export RLT_BIN="$RUNNER_TEMP/bin/tidy" RLT_PUSH_FAIL=1
-          bash "$RUNNER_TEMP/run_dedent.sh" && { echo "should have failed"; exit 1; } || true
+          python3 "$GITHUB_WORKSPACE/scripts/run_tidy.py" && { echo "should have failed"; exit 1; } || true
           grep -q "could not push fixes" "$RUNNER_TEMP/rlt-comment.md"
           grep -q '`lib.rs`' "$RUNNER_TEMP/rlt-comment.md"
           # The report describes the PR head, not the local fix commit.
@@ -477,38 +485,39 @@ jobs:
           grep -Fq "blob/$RLT_HEAD_SHA/lib.rs#L1" "$RUNNER_TEMP/gh-api-body.json"
           unset RLT_PUSH_FAIL
 
-      - name: check + dirty PR (expect fail comment with findings + exit 1, no commit)
+      - name: check + untidy PR (expect findings + exit 1, no edits or commit)
         shell: bash
         run: |
           cd "$RUNNER_TEMP/repo"
           git reset -q --hard tidy-base && git clean -qfd
-          printf 'fn b() { a(); }\nfn a() {}\n' > lib.rs
+          printf 'fn a() {}\nfn b() { a(); }\n' > lib.rs
           git add -A; git commit -qm untidy3
 
           export PATH="$RUNNER_TEMP/bin:$PATH"
-          export MODE=check IS_PR=true PR_NUMBER=7 HEAD_REF=feature
+          export RLT_MODE=check IS_PR=true PR_NUMBER=7 HEAD_REF=feature
           export COMMIT_NAME=bot COMMIT_EMAIL=b@b GITHUB_TOKEN=x RLT_BIN="$RUNNER_TEMP/bin/tidy"
           export RLT_STUB_RC=1
           # The PR head this run reports on: untidy3, pushed (force: the
-          # fixture history diverged) so the remote matches it. The head
-          # view needs the run's argv file (normally written by the args
-          # step).
+          # fixture history diverged) so the remote matches it.
           git push -q -f origin HEAD:refs/heads/feature
           export RLT_HEAD_SHA="$(git rev-parse HEAD)"
-          printf '%s\0' --output-mode json . > "$RUNNER_TEMP/rlt-args"
           rm -f "$RUNNER_TEMP/gh-api.log" "$RUNNER_TEMP/gh-api-body.json"
-          bash "$RUNNER_TEMP/run_dedent.sh" && { echo "should have failed"; exit 1; } || true
+          rm -f "$RUNNER_TEMP/tidy-calls" "$RUNNER_TEMP/rlt-head-run.json"
+          python3 "$GITHUB_WORKSPACE/scripts/run_tidy.py" && { echo "should have failed"; exit 1; } || true
           grep -q "not tidy" "$RUNNER_TEMP/rlt-comment.md"
           # findings render as severity-grouped bullets from the JSON document
           grep -q '^1 error\.$' "$RUNNER_TEMP/rlt-comment.md"
           grep -q '^### Errors$' "$RUNNER_TEMP/rlt-comment.md"
-          grep -q '\*\*`DOC001` missing documentation\*\* - `lib.rs:1`' "$RUNNER_TEMP/rlt-comment.md"
+          grep -q 'missing documentation\*\* - `lib.rs:1`' "$RUNNER_TEMP/rlt-comment.md"
           # pipe in a finding bullet renders raw (bullets cannot split cells)
           grep -q 'non-private item | note missing a doc comment' "$RUNNER_TEMP/rlt-comment.md"
-          # check mode must NOT commit
-          test "$(git rev-parse HEAD)" = "$(git rev-parse HEAD~0)"
-          # The report describes the committed PR head, not the fixes left
-          # uncommitted in the tree.
+          test "$(git rev-parse HEAD)" = "$RLT_HEAD_SHA"
+          test -z "$(git status --porcelain)"
+          # the single read-only scan; the --help probe exits before recording
+          test "$(wc -l < "$RUNNER_TEMP/tidy-calls")" -eq 1
+          grep -q -- '--dry-run' "$RUNNER_TEMP/tidy-calls"
+          test ! -f "$RUNNER_TEMP/rlt-head-run.json"
+          # The single read-only scan describes the committed PR head.
           posts="$(grep -c -- '--method POST' "$RUNNER_TEMP/gh-api.log" || true)"
           test "$posts" = 1
           grep -Fq "blob/$RLT_HEAD_SHA/lib.rs#L1" "$RUNNER_TEMP/gh-api-body.json"
@@ -518,14 +527,14 @@ jobs:
         run: |
           cd "$RUNNER_TEMP/repo"
           git reset -q --hard tidy-base && git clean -qfd
-          printf 'fn b() { a(); }\nfn a() {}\n' > lib.rs
+          printf 'fn a() {}\nfn b() { a(); }\n' > lib.rs
           git add -A; git commit -qm untidy4
 
           rm -f "$RUNNER_TEMP/rlt-comment.md"
           export PATH="$RUNNER_TEMP/bin:$PATH"
-          export MODE=apply IS_PR=false PR_NUMBER=7 HEAD_REF=feature
+          export RLT_MODE=apply IS_PR=false PR_NUMBER=7 HEAD_REF=feature
           export COMMIT_NAME=bot COMMIT_EMAIL=b@b GITHUB_TOKEN=x RLT_BIN="$RUNNER_TEMP/bin/tidy"
-          bash "$RUNNER_TEMP/run_dedent.sh"
+          python3 "$GITHUB_WORKSPACE/scripts/run_tidy.py"
           echo "exit=$? (expect 0)"
           grep -q "fn init()" lib.rs      # mutated
           test ! -f "$RUNNER_TEMP/rlt-comment.md"   # no comment written
@@ -541,9 +550,9 @@ jobs:
           rm -f "$RUNNER_TEMP/rlt-comment.md" "$RUNNER_TEMP/gh-api.log" \
                 "$RUNNER_TEMP/gh-api-body.json"
           export PATH="$RUNNER_TEMP/bin:$PATH"
-          export MODE=apply IS_PR=true PR_NUMBER=7 HEAD_REF=feature
+          export RLT_MODE=apply IS_PR=true PR_NUMBER=7 HEAD_REF=feature
           export COMMIT_NAME=bot COMMIT_EMAIL=b@b GITHUB_TOKEN=x RLT_BIN="$RUNNER_TEMP/bin/tidy-clean"
-          bash "$RUNNER_TEMP/run_dedent.sh"
+          python3 "$GITHUB_WORKSPACE/scripts/run_tidy.py"
           echo "exit=$? (expect 0)"
           test ! -f "$RUNNER_TEMP/rlt-comment.md"   # success: no comment
           # No findings and no prior report: nothing is published.
@@ -560,10 +569,10 @@ jobs:
           git reset -q --hard tidy-base && git clean -qfd
           rm -f "$RUNNER_TEMP/rlt-comment.md"
           export PATH="$RUNNER_TEMP/bin:$PATH"
-          export MODE=check IS_PR=true PR_NUMBER=7 HEAD_REF=feature
+          export RLT_MODE=check IS_PR=true PR_NUMBER=7 HEAD_REF=feature
           export COMMIT_NAME=bot COMMIT_EMAIL=b@b GITHUB_TOKEN=x RLT_BIN="$RUNNER_TEMP/bin/tidy-dry-run"
           export RLT_STUB_RC=1
-          bash "$RUNNER_TEMP/run_dedent.sh" && { echo "should have failed"; exit 1; } || true
+          python3 "$GITHUB_WORKSPACE/scripts/run_tidy.py" && { echo "should have failed"; exit 1; } || true
           grep -q 'not tidy' "$RUNNER_TEMP/rlt-comment.md"
           # change record rendered into a Changes block, pipe escaped
           grep -q '^### Changes' "$RUNNER_TEMP/rlt-comment.md"
@@ -571,41 +580,19 @@ jobs:
           grep -q 'rearrange fn a_main &#124; from pos 2 to pos 1' "$RUNNER_TEMP/rlt-comment.md"
           unset RLT_STUB_RC
 
-      - name: args builder requests JSON for dry-run too
+      - name: run entrypoint builds JSON-dry-run argv from inputs (expect exit 0)
         shell: bash
         run: |
-          # Substitute the inputs.* templates (dry-run = true), building the
-          # needles from parts so this workflow's evaluator does not
-          # substitute them first. Remaining inputs: RLT_* env vars below.
-          python3 - <<'PY'
-          import os
-          import yaml
-          d = yaml.safe_load(open('action.yml'))
-          src = next(s['run'] for s in d['runs']['steps'] if s.get('id') == 'args')
-          text = "\n".join(
-              line[8:] if line.startswith(" " * 8) else line
-              for line in src.split("\n")
-          )
-          for key, value in (
-              ("inputs.validate", "false"),
-              ("inputs.no-config", "false"),
-              ("inputs.dry-run", "true"),
-          ):
-              text = text.replace("$" + "{{ " + key + " }}", value)
-          path = os.path.join(os.environ["RUNNER_TEMP"], "args_dedent.sh")
-          open(path, "w").write(text)
-          PY
           cd "$RUNNER_TEMP/repo"
-          RLT_CONFIG_PATH= RLT_INCLUDE= RLT_EXCLUDE= \
-          RLT_PATH_LIST= RLT_DEFAULT_FILES= RLT_CHANGED_FILES= \
-          bash "$RUNNER_TEMP/args_dedent.sh"
-          args=(); while IFS= read -r -d '' a; do args+=("$a"); done < "$RUNNER_TEMP/rlt-args"
-          # Exact argv: JSON output, dry-run, whole-project path.
-          expected=(--output-mode json --dry-run .)
-          test "${#args[@]}" -eq "${#expected[@]}"
-          for i in "${!expected[@]}"; do
-            test "${args[$i]}" = "${expected[$i]}"
-          done
+          git reset -q --hard tidy-base && git clean -qfd
+          rm -f "$RUNNER_TEMP/tidy-calls"
+          export PATH="$RUNNER_TEMP/bin:$PATH"
+          export RLT_MODE=apply RLT_DRY_RUN=true IS_PR=false
+          export RLT_BIN="$RUNNER_TEMP/bin/tidy"
+          python3 "$GITHUB_WORKSPACE/scripts/run_tidy.py"
+          # Exact argv recorded by the stub: JSON output, dry-run,
+          # separator, whole-project path.
+          test "$(cat "$RUNNER_TEMP/tidy-calls")" = "--output-mode json --dry-run -- ."
 
       - name: check + PR, lint-only failing dry-run (expect report + exit 1)
         shell: bash
@@ -614,14 +601,14 @@ jobs:
           git reset -q --hard tidy-base && git clean -qfd
           rm -f "$RUNNER_TEMP/rlt-comment.md"
           export PATH="$RUNNER_TEMP/bin:$PATH"
-          export MODE=check IS_PR=true PR_NUMBER=7 HEAD_REF=feature
+          export RLT_MODE=check IS_PR=true PR_NUMBER=7 HEAD_REF=feature
           export COMMIT_NAME=bot COMMIT_EMAIL=b@b GITHUB_TOKEN=x
           export RLT_BIN="$RUNNER_TEMP/bin/tidy-docgap" RLT_STUB_RC=1
-          bash "$RUNNER_TEMP/run_dedent.sh" && { echo "should have failed"; exit 1; } || true
+          python3 "$GITHUB_WORKSPACE/scripts/run_tidy.py" && { echo "should have failed"; exit 1; } || true
           grep -q 'not tidy' "$RUNNER_TEMP/rlt-comment.md"
           grep -q '^### Errors$' "$RUNNER_TEMP/rlt-comment.md"
           # the record's own title renders, not the TITLES map entry for DOC001
-          grep -q '\*\*`DOC001` record-sourced title\*\*' "$RUNNER_TEMP/rlt-comment.md"
+          grep -q 'record-sourced title\*\*' "$RUNNER_TEMP/rlt-comment.md"
           grep -q 'DOC001' "$RUNNER_TEMP/rlt-comment.md"
 
       - name: comment locations pin the blob SHA when RLT_BLOB_BASE is set (expect report + exit 1)
@@ -631,24 +618,26 @@ jobs:
           git reset -q --hard tidy-base && git clean -qfd
           rm -f "$RUNNER_TEMP/rlt-comment.md"
           export PATH="$RUNNER_TEMP/bin:$PATH"
-          export MODE=check IS_PR=true PR_NUMBER=7 HEAD_REF=feature
+          export RLT_MODE=check IS_PR=true PR_NUMBER=7 HEAD_REF=feature
           export COMMIT_NAME=bot COMMIT_EMAIL=b@b GITHUB_TOKEN=x
           export RLT_BIN="$RUNNER_TEMP/bin/tidy-fallback" RLT_STUB_RC=1
           export RLT_BLOB_BASE="https://github.com/o/r/blob/stubsha/"
-          bash "$RUNNER_TEMP/run_dedent.sh" && { echo "should have failed"; exit 1; } || true
+          python3 "$GITHUB_WORKSPACE/scripts/run_tidy.py" && { echo "should have failed"; exit 1; } || true
           # linked mode: locations render as SHA-pinned blob links
           grep -Fq '[lib.rs:1](<https://github.com/o/r/blob/stubsha/lib.rs#L1>)' "$RUNNER_TEMP/rlt-comment.md"
           grep -Fq '[lib.rs:2](<https://github.com/o/r/blob/stubsha/lib.rs#L2>)' "$RUNNER_TEMP/rlt-comment.md"
           # unmapped lint code falls back to the raw code as title
-          grep -q '\*\*`DOC009` DOC009\*\*' "$RUNNER_TEMP/rlt-comment.md"
+          grep -q ' DOC009\*\*' "$RUNNER_TEMP/rlt-comment.md"
           # empty `title` falls through to the map entry (never renders empty)
-          grep -q '\*\*`DOC001` missing documentation\*\*' "$RUNNER_TEMP/rlt-comment.md"
+          grep -q 'missing documentation\*\*' "$RUNNER_TEMP/rlt-comment.md"
           grep -q '^1 error, 1 warning\.$' "$RUNNER_TEMP/rlt-comment.md"
           # warnings group under their own section, after Errors
           grep -q '^### Warnings$' "$RUNNER_TEMP/rlt-comment.md"
 
   test-skipping-prebuilt-7z-install-apt:
     runs-on: ubuntu-latest
+    env:
+      RUST_LLM_TIDY_DIFF_BASE: HEAD
     steps:
       - name: Checkout Action Repository
         uses: actions/checkout@v7
@@ -660,7 +649,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p fixture
-          printf 'fn b() { a(); }\nfn a() {}\n' > fixture/lib.rs
+          printf 'fn a() {}\nfn b() { a(); }\n' > fixture/lib.rs
           git init -q fixture
           git -C fixture config user.email ci@test
           git -C fixture config user.name ci
@@ -676,8 +665,9 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y p7zip-full
 
-      - name: Run action (prebuilt, apt 7z)
+      - name: Run action (prebuilt 0.5.0, apt 7z; lacks --checks-only)
         id: tidy
+        continue-on-error: true
         uses: ./
         with:
           rust-project-path: fixture
@@ -689,9 +679,10 @@ jobs:
           release-repo: Sewer56/rust-llm-tidy
           release-tag: 0.5.0
 
-      - name: Assert apply worked
+      - name: Assert capability failure with apt-resolved extraction
         shell: bash
         run: |
-          a=$(grep -n "fn a()" fixture/lib.rs | cut -d: -f1)
-          b=$(grep -n "fn b()" fixture/lib.rs | cut -d: -f1)
-          test "$b" -lt "$a"
+          test "${{ steps.tidy.outcome }}" = "failure"
+          test -n "${{ steps.tidy.outputs.binary-path }}"
+          test -z "$(git -C fixture status --porcelain)"
+          test "$(git -C fixture log -1 --format=%s)" = untidy-baseline

@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import finding_compare  # noqa: E402
+from reporting import finding_compare  # noqa: E402
 import sticky_publish  # noqa: E402
 from fake_gh import (BOT, HEAD, NEW_HEAD, PR, REPOSITORY, SERVER, FakeTransport,
                      finding)  # noqa: E402
@@ -77,6 +77,61 @@ class SnapshotCodecTests(unittest.TestCase):
 
 
 class PublishTests(unittest.TestCase):
+    def test_reminders_should_retain_then_clear_their_original_revision(self):
+        transport = FakeTransport()
+        reminder = finding(severity="reminder", code="SYM001", line=7)
+
+        publish_once(transport, [reminder])
+
+        body = sticky_body(transport)
+        self.assertIn("1 reminder.", body)
+        self.assertIn("### Reminders - changed lines by default", body)
+        self.assertEqual(sticky_publish.decode_state(body)["findings"],
+                         [finding_compare.entry(reminder, HEAD)])
+
+        transport.head_sha = NEW_HEAD
+        summary = publish_once(transport, [dict(reminder, line=9)], revision=NEW_HEAD)
+
+        self.assertEqual(summary["status"], "unchanged")
+        self.assertEqual(len(transport.writes()), 1)
+
+        summary = publish_once(transport, [], revision=NEW_HEAD)
+
+        self.assertTrue(summary["delta_posted"])
+        self.assertIn("No current findings.", sticky_body(transport))
+        delta = transport.calls[-1][2]["body"]
+        self.assertIn("0 added, 1 cleared", delta)
+        self.assertIn(f"blob/{HEAD}/src/lib.rs#L7", delta)
+
+    def test_reminders_should_render_after_hints_when_added(self):
+        transport = FakeTransport()
+        hint = finding(severity="hint")
+        publish_once(transport, [hint])
+        transport.head_sha = NEW_HEAD
+        reminder = finding(severity="reminder", code="SYM001")
+
+        summary = publish_once(transport, [hint, reminder], revision=NEW_HEAD)
+
+        self.assertTrue(summary["delta_posted"])
+        body = sticky_body(transport)
+        self.assertIn("1 hint, 1 reminder.", body)
+        self.assertLess(body.index("### Hints"), body.index("### Reminders"))
+        self.assertIn("1 added, 0 cleared", transport.calls[-1][2]["body"])
+
+    def test_reminders_should_respect_report_budget_when_snapshot_overflows(self):
+        transport = FakeTransport()
+        records = [finding(severity="reminder", path=f"src/f{i}.rs")
+                   for i in range(5000)]
+
+        publish_once(transport, records)
+
+        body = sticky_body(transport)
+        self.assertLessEqual(len(body), sticky_publish.MAX_COMMENT_CHARS)
+        self.assertIn("5000 reminders.", body)
+        self.assertIn("### Reminders - changed lines by default", body)
+        self.assertIn("more not shown", body)
+        self.assertTrue(sticky_publish.decode_state(body)["overflow"])
+
     def test_first_findings_create_one_sticky_without_a_change_report(self):
         transport = FakeTransport()
         summary = publish_once(transport, findings_doc(finding()))

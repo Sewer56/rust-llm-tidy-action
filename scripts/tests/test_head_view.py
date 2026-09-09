@@ -1,4 +1,4 @@
-"""Committed-head collection: worktree isolation, dry run, fail-closed."""
+"""Committed-head collection: worktree isolation, checks-only, fail-closed."""
 
 import json
 import os
@@ -40,13 +40,13 @@ class HeadViewTests(unittest.TestCase):
 
         self.bin_dir = self.root / "bin"
         self.bin_dir.mkdir()
-        # The tidy stub: in --dry-run mode it reports the file's actual
+        # The tidy stub: a --checks-only scan reports the file's actual
         # first line, so the test can tell committed content (the head
         # worktree) from mutated content (the dirty main checkout).
         self.tidy = self.bin_dir / "tidy"
         write_stub(self.tidy, """#!/usr/bin/env bash
-for a in "$@"; do [ "$a" = "--dry-run" ] && dry=1; done
-if [ "${dry:-0}" = 1 ]; then
+for a in "$@"; do [ "$a" = "--checks-only" ] && checks=1; done
+if [ "${checks:-0}" = 1 ]; then
   line="$(head -n1 lib.rs)"
   printf '[{"path":"lib.rs","line":1,"severity":"error","code":"DOC001","message":"committed: %s","item_kind":"fn","item_name":"hello","title":"missing documentation"}]\\n' "$line"
   exit 1
@@ -121,8 +121,8 @@ exec "{self.real_git}" "$@"
 
         tidy_cwd = self.bin_dir / "tidy-cwd"
         write_stub(tidy_cwd, """#!/usr/bin/env bash
-for a in "$@"; do [ "$a" = "--dry-run" ] && dry=1; done
-if [ "${dry:-0}" = 1 ]; then
+for a in "$@"; do [ "$a" = "--checks-only" ] && checks=1; done
+if [ "${checks:-0}" = 1 ]; then
   printf '[{"path":"lib.rs","line":1,"severity":"error","code":"DOC001","message":"cwd:%s","item_kind":"fn","item_name":"hello","title":"missing documentation"}]\\n' "$(basename "$PWD")"
   exit 1
 fi
@@ -134,6 +134,31 @@ exit 1
 
         records = json.loads(self.out.read_text())
         self.assertEqual(records[0]["message"], "cwd:proj")
+
+    def test_rescan_replaces_a_saved_dry_run_with_checks_only(self):
+        # Check mode's main run saves --dry-run; the rescan strips it and
+        # scans with --checks-only instead, placed before `--` so
+        # flag-shaped target names stay paths.
+        args_log = self.root / "scan-args"
+        write_stub(self.tidy, f"""#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "{args_log}"
+exit 1
+""")
+        cases = (
+            ("plain", b"--output-mode\0json\0--dry-run\0.\0",
+             "--output-mode json . --checks-only"),
+            ("separator", b"--output-mode\0json\0--dry-run\0--\0lib.rs\0",
+             "--output-mode json --checks-only -- lib.rs"),
+        )
+
+        for name, saved, expected in cases:
+            with self.subTest(argv=name):
+                self.args_file.write_bytes(saved)
+
+                self.assertEqual(self.collect(), 1)  # no JSON: fail closed
+
+                self.assertEqual(args_log.read_text().splitlines()[-1],
+                                 expected)
 
     def test_repository_with_submodules_fails_closed(self):
         # .gitmodules at the collected revision means the worktree cannot

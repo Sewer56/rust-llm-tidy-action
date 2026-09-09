@@ -2,7 +2,7 @@
 """Maintain a PR findings report and post summaries of changes.
 
 The "sticky" report is a comment updated in place, not recreated every run.
-It groups errors, warnings, and hints separately.
+It groups errors, warnings, hints, and reminders separately.
 It also stores a hidden snapshot for the next comparison.
 
 Unchanged findings keep links to their original commits.
@@ -50,9 +50,9 @@ import os
 import re
 import sys
 
-import finding_compare
-import gh_api
-import json_table
+from reporting import finding_compare
+from reporting import gh_api
+from reporting import json_table
 
 # Snapshot marker doubles as the sticky-comment identifier. The snapshot
 # line is appended last, and decoding uses the last marker occurrence,
@@ -78,8 +78,6 @@ DEFAULT_LOGIN = "github-actions[bot]"
 _REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _REVISION = re.compile(r"^[0-9a-fA-F]{7,64}$")
 
-_SECTIONS = (("error", "Errors"), ("warning", "Warnings"),
-             ("hint", "Hints - consider looking at these"))
 _TRUNCATED_NOTE = "- … and {count} more not shown (report size budget)"
 _OVERFLOW_NOTE = (
     "> Report budget exceeded: the list below is truncated, and the next run"
@@ -172,7 +170,7 @@ def _bullet(record, revision, server_url, repository):
 
 def _sections(entries, server_url, repository):
     """Per-severity bullet lists, severities missing a group skipped."""
-    grouped = {severity: [] for severity, _ in _SECTIONS}
+    grouped = {severity: [] for severity, _ in json_table.FINDING_SECTIONS}
     for stored in entries:
         severity = stored["record"].get("severity")
         if severity in grouped:
@@ -181,7 +179,7 @@ def _sections(entries, server_url, repository):
             )
     return [
         (header, grouped[severity])
-        for severity, header in _SECTIONS
+        for severity, header in json_table.FINDING_SECTIONS
         if grouped[severity]
     ]
 
@@ -216,14 +214,14 @@ def _sticky_body(entries, state, overflow, server_url, repository, budget):
     if not entries:
         lines.append("No current findings.")
     else:
-        counts = {"error": 0, "warning": 0, "hint": 0}
+        counts = {severity: 0 for severity, _ in json_table.FINDING_SECTIONS}
         for stored in entries:
             severity = stored["record"].get("severity")
             if severity in counts:
                 counts[severity] += 1
         lines.append(
             json_table.counts_line(
-                counts["error"], counts["warning"], counts["hint"], 0
+                *(counts[severity] for severity, _ in json_table.FINDING_SECTIONS), 0
             )
         )
     if overflow:
