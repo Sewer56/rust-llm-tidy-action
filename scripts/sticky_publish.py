@@ -2,7 +2,7 @@
 """Maintain a PR findings report and post summaries of changes.
 
 The "sticky" report is a comment updated in place, not recreated every run.
-It groups errors, warnings, hints, and reminders separately.
+It groups findings by severity and shows their full messages as literal text.
 It also stores a hidden snapshot for the next comparison.
 
 Unchanged findings keep links to their original commits.
@@ -168,17 +168,31 @@ def _bullet(record, revision, server_url, repository):
     return json_table.finding_lines(record, base)[0]
 
 
+REMINDER_NOTE = (
+    "Reminders are prompts to consider, not required fixes. They cannot always "
+    "be resolved and may remain even when the code is appropriate. "
+    "Reminders alone do not fail the check."
+)
+
+
 def _sections(entries, server_url, repository):
-    """Per-severity bullet lists, severities missing a group skipped."""
+    """Group complete findings by severity, with raw messages as code blocks."""
     grouped = {severity: [] for severity, _ in json_table.FINDING_SECTIONS}
     for stored in entries:
         severity = stored["record"].get("severity")
         if severity in grouped:
+            record = stored["record"]
+            message = str(record.get("message", ""))
+            # Indented code keeps message text literal, including fences and HTML.
+            raw = "\n".join("      " + line for line in message.split("\n"))
             grouped[severity].append(
-                _bullet(stored["record"], stored["revision"], server_url, repository)
+                _bullet(record, stored["revision"], server_url, repository)
+                + "\n\n" + raw + "\n"
             )
+
     return [
-        (header, grouped[severity])
+        ("Reminders\n\n" + REMINDER_NOTE + "\n" if severity == "reminder" else header,
+         grouped[severity])
         for severity, header in json_table.FINDING_SECTIONS
         if grouped[severity]
     ]

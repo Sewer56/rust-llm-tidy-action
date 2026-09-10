@@ -77,6 +77,26 @@ class SnapshotCodecTests(unittest.TestCase):
 
 
 class PublishTests(unittest.TestCase):
+    def test_sticky_should_show_raw_messages_for_multiple_findings(self):
+        transport = FakeTransport()
+        warning = finding(severity="warning", message="src/lib.rs: First. Second;")
+        reminder = finding(severity="reminder", message="Keep lines:\n```\n<b>literal</b>")
+
+        publish_once(transport, [warning, reminder])
+
+        body = sticky_body(transport)
+        self.assertIn("      src/lib.rs: First. Second;\n", body)
+        self.assertIn("      Keep lines:\n      ```\n      <b>literal</b>\n", body)
+        self.assertEqual(body.count(sticky_publish.REMINDER_NOTE), 1)
+        self.assertEqual(len(sticky_publish.decode_state(body)["findings"]), 2)
+
+    def test_sticky_should_omit_reminder_note_without_reminders(self):
+        transport = FakeTransport()
+
+        publish_once(transport, [finding()])
+
+        self.assertNotIn(sticky_publish.REMINDER_NOTE, sticky_body(transport))
+
     def test_reminders_should_retain_then_clear_their_original_revision(self):
         transport = FakeTransport()
         reminder = finding(severity="reminder", code="SYM001", line=7)
@@ -85,7 +105,7 @@ class PublishTests(unittest.TestCase):
 
         body = sticky_body(transport)
         self.assertIn("1 reminder.", body)
-        self.assertIn("### Reminders - changed lines by default", body)
+        self.assertIn("### Reminders\n", body)
         self.assertEqual(sticky_publish.decode_state(body)["findings"],
                          [finding_compare.entry(reminder, HEAD)])
 
@@ -128,7 +148,7 @@ class PublishTests(unittest.TestCase):
         body = sticky_body(transport)
         self.assertLessEqual(len(body), sticky_publish.MAX_COMMENT_CHARS)
         self.assertIn("5000 reminders.", body)
-        self.assertIn("### Reminders - changed lines by default", body)
+        self.assertIn("### Reminders\n", body)
         self.assertIn("more not shown", body)
         self.assertTrue(sticky_publish.decode_state(body)["overflow"])
 
