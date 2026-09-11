@@ -85,7 +85,7 @@ Example: run only `reorder` + `lints` on `src` and `README.md`, apply in
 place:
 
 ```yaml
-- uses: Sewer56/rust-llm-tidy-action@v1
+- uses: Sewer56/rust-llm-tidy-action@v2
   with:
     rust-project-path: '.'
     paths: |
@@ -113,7 +113,7 @@ files the PR changes are evaluated, and the job fails if any are not tidy:
 steps:
   - uses: actions/checkout@v6
 
-  - uses: Sewer56/rust-llm-tidy-action@v1
+  - uses: Sewer56/rust-llm-tidy-action@v2
     with:
       rust-project-path: '.'
       changed-files: 'true'
@@ -129,7 +129,7 @@ default config discovery, which finds nothing and runs everything).
 Without `changed-files`, the action tidies the whole `rust-project-path`:
 
 ```yaml
-- uses: Sewer56/rust-llm-tidy-action@v1
+- uses: Sewer56/rust-llm-tidy-action@v2
   with:
     rust-project-path: '.'
     paths: '.'
@@ -149,7 +149,7 @@ Default builds the current checkout at `${{ github.workspace }}`. To build a
 pinned remote checkout instead, use `use-source-checkout: true`:
 
 ```yaml
-- uses: Sewer56/rust-llm-tidy-action@v1
+- uses: Sewer56/rust-llm-tidy-action@v2
   with:
     binary-source: 'git'
     use-source-checkout: 'true'   # checkout Sewer56/rust-llm-tidy@<ref>
