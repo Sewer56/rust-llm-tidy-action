@@ -53,6 +53,79 @@ class JsonTableTests(unittest.TestCase):
         self.assertIn("src/lib.rs:7", out)
         self.assertIn("src/lib.rs:9", out)
 
+    def test_ai_reminders_should_render_collapsed_after_reminders(self):
+        records = [finding(severity="reminder", code="SYM001"),
+                   finding(severity="ai_reminder", code="SYM002")]
+
+        out = render(records)
+
+        self.assertEqual(out.splitlines()[0], "1 reminder, 1 AI reminder.")
+        self.assertLess(out.index("### Reminders - changed lines by default"),
+                        out.index("<details>"))
+        self.assertIn("<summary>Reminders for AI Language Models</summary>", out)
+        self.assertNotIn("<details open>", out)
+        # The AI bullet is the only content inside the one disclosure.
+        self.assertEqual(out.count("<details>"), 1)
+        self.assertEqual(out.count("</details>"), 1)
+        self.assertLess(out.index("[`SYM002`]"), out.index("</details>"))
+        self.assertEqual(out.splitlines()[-1], "</details>")
+
+    def test_ai_reminders_should_render_counts_and_locations_when_only_findings(self):
+        records = [finding(severity="ai_reminder", line=7),
+                   finding(severity="ai_reminder", line=9)]
+
+        out = render(records)
+
+        self.assertEqual(out.splitlines()[0], "2 AI reminders.")
+        self.assertNotIn("### Hints", out)
+        self.assertIn("src/lib.rs:7", out)
+        self.assertIn("src/lib.rs:9", out)
+
+    def test_report_should_omit_the_disclosure_without_ai_reminders(self):
+        out = render([finding(severity="reminder", code="SYM001")])
+
+        self.assertNotIn("<details>", out)
+        self.assertIn("### Reminders - changed lines by default", out)
+
+    def test_ai_reminders_should_stay_before_the_changes_table(self):
+        records = [
+            {"severity": "success", "code": "FIX", "path": "src/lib.rs",
+             "line": 1, "message": "fix"},
+            finding(severity="reminder"),
+            finding(severity="ai_reminder", code="SYM001"),
+        ]
+
+        out = render(records)
+
+        self.assertEqual(out.splitlines()[0], "1 reminder, 1 AI reminder, 1 change.")
+        self.assertLess(out.index("### Reminders"), out.index("<details>"))
+        self.assertLess(out.index("</details>"), out.index("### Changes"))
+
+    def test_ai_markup_in_message_or_title_cannot_restructure_the_report(self):
+        records = [
+            finding(severity="ai_reminder", code="SYM001", line=1,
+                    title="Widgets",
+                    message="Keep </details> then </DETAILS > and <details> open."),
+            finding(severity="ai_reminder", code="SYM002", line=2,
+                    title="Use <DeTaIlS open> here",
+                    message='See <details data-x="a>b"> for the pattern.'),
+            {"severity": "success", "code": "FIX", "path": "src/lib.rs",
+             "line": 3, "message": "fix"},
+        ]
+
+        out = render(records)
+
+        # Only the generated wrapper is markup; injected delimiters are text.
+        self.assertEqual(out.count("<details"), 1)
+        self.assertEqual(out.count("</details>"), 1)
+        self.assertIn("&lt;/details>", out)
+        self.assertIn("&lt;/DETAILS >", out)
+        self.assertIn("&lt;details>", out)
+        self.assertIn("&lt;DeTaIlS open>", out)
+        self.assertIn('&lt;details data-x="a>b">', out)
+        # Generated content after the section stays outside the disclosure.
+        self.assertLess(out.index("</details>"), out.index("### Changes"))
+
     def test_hints_render_as_a_separate_trailing_section(self):
         records = [
             finding(severity="warning", code="DOC008", path="src/lib.rs", line=9,

@@ -1,5 +1,6 @@
 """Sticky publication: state handling, authentication, budgets, recovery."""
 
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -29,6 +30,17 @@ def findings_doc(*records):
 def sticky_body(transport):
     """The newest owned sticky body in the fake PR conversation."""
     return transport.sticky_bodies()[-1]
+
+
+def hidden_count(body):
+    """Findings the truncation note reports as hidden; 0 when it is absent."""
+    match = re.search(r"and (\d+) more not shown \(report size budget\)", body)
+    return int(match.group(1)) if match else 0
+
+
+def bullet_count(body, prefixes):
+    """Finding bullets whose first line starts with any of `prefixes`."""
+    return sum(1 for line in body.splitlines() if line.startswith(prefixes))
 
 
 class SnapshotCodecTests(unittest.TestCase):
@@ -235,6 +247,150 @@ class PublishTests(unittest.TestCase):
         self.assertEqual(state["revision"], NEW_HEAD)
         # The sticky is updated, never deleted.
         self.assertNotIn("DELETE", [method for method, _ in transport.writes()])
+
+    def test_ai_reminders_should_render_collapsed_after_reminders(self):
+        transport = FakeTransport()
+
+        publish_once(transport, [finding(severity="reminder", code="SYM001"),
+                                 finding(severity="ai_reminder", code="SYM002")])
+
+        body = sticky_body(transport)
+        self.assertIn("1 reminder, 1 AI reminder.", body)
+        self.assertLess(body.index("### Reminders"), body.index("<details>"))
+        self.assertIn("<summary>Reminders for AI Language Models</summary>", body)
+        self.assertNotIn("<details open>", body)
+        self.assertEqual(body.count("<details>"), 1)
+        self.assertEqual(body.count("</details>"), 1)
+        self.assertLess(body.index("SYM002"), body.index("</details>"))
+        # The hidden snapshot stays the last word after the markup closes.
+        self.assertLess(body.index("</details>"), body.index(sticky_publish.MARKER))
+
+    def test_ai_reminders_should_retain_then_clear_their_original_revision(self):
+        transport = FakeTransport()
+        reminder = finding(severity="ai_reminder", code="SYM001", line=7)
+
+        publish_once(transport, [reminder])
+
+        body = sticky_body(transport)
+        self.assertIn("1 AI reminder.", body)
+        self.assertEqual(sticky_publish.decode_state(body)["findings"],
+                         [finding_compare.entry(reminder, HEAD)])
+
+        transport.head_sha = NEW_HEAD
+        summary = publish_once(transport, [dict(reminder, line=9)], revision=NEW_HEAD)
+
+        self.assertEqual(summary["status"], "unchanged")
+        self.assertEqual(len(transport.writes()), 1)
+
+        summary = publish_once(transport, [], revision=NEW_HEAD)
+
+        self.assertTrue(summary["delta_posted"])
+        delta = transport.calls[-1][2]["body"]
+        self.assertIn("0 added, 1 cleared", delta)
+        self.assertIn("<summary>Reminders for AI Language Models</summary>", delta)
+        self.assertIn("cleared:", delta)
+        self.assertIn(f"blob/{HEAD}/src/lib.rs#L7", delta)
+
+    def test_added_ai_reminders_should_render_collapsed_in_the_delta(self):
+        transport = FakeTransport()
+        hint = finding(severity="hint", code="DOC999")
+        publish_once(transport, [hint])
+        transport.head_sha = NEW_HEAD
+        reminder = finding(severity="ai_reminder", code="SYM001")
+        warning = finding(severity="warning", code="DOC008", path="src/main.rs",
+                          line=9)
+
+        summary = publish_once(transport, [hint, reminder, warning],
+                               revision=NEW_HEAD)
+
+        self.assertTrue(summary["delta_posted"])
+        delta = transport.calls[-1][2]["body"]
+        self.assertIn("2 added, 0 cleared", delta)
+        # Ordinary additions stay expanded; AI additions stay collapsed.
+        self.assertIn("### Added", delta)
+        self.assertLess(delta.index("### Added"), delta.index("<details>"))
+        self.assertIn(f"blob/{NEW_HEAD}/src/main.rs#L9", delta)
+        self.assertIn("<summary>Reminders for AI Language Models</summary>", delta)
+        self.assertIn("added:", delta)
+        self.assertIn(f"blob/{NEW_HEAD}/src/lib.rs#L3", delta)
+
+    def test_ai_disclosure_should_omit_rather_than_leave_markup_open(self):
+        entries = [finding_compare.entry(
+            finding(severity="ai_reminder", path=f"src/f{i}.rs"), HEAD)
+            for i in range(20)]
+        full, _ = sticky_publish.render_sticky(entries, HEAD, SERVER, REPOSITORY,
+                                               budget=1_000_000)
+        # Mandatory header, counts, and snapshot; the sweep starts where the
+        # budget can at least cover those.
+        floor, _ = sticky_publish.render_sticky(entries, HEAD, SERVER, REPOSITORY,
+                                                budget=0)
+        self.assertEqual(bullet_count(full, "- **"), 20)
+        self.assertEqual(hidden_count(full), 0)
+
+        omitted = partial = 0
+        for budget in range(len(floor), len(full), 7):
+            with self.subTest(budget=budget):
+                body, _ = sticky_publish.render_sticky(
+                    entries, HEAD, SERVER, REPOSITORY, budget=budget)
+
+                self.assertLessEqual(len(body), budget)
+                self.assertEqual(body.count("<details>"),
+                                 body.count("</details>"))
+                self.assertIn("20 AI reminders.", body)
+                shown = bullet_count(body, "- **")
+                self.assertEqual(shown + hidden_count(body), 20)
+                if "<details>" not in body:
+                    omitted += 1
+                    self.assertEqual(shown, 0)
+                elif hidden_count(body):
+                    partial += 1
+        self.assertGreater(omitted, 0)
+        self.assertGreater(partial, 0)
+
+    def test_sticky_should_bound_mixed_ordinary_and_ai_sections(self):
+        entries = [
+            finding_compare.entry(
+                finding(severity="warning", code="DOC008", path=f"src/w{i}.rs",
+                        message="m" * 60), HEAD)
+            for i in range(10)
+        ] + [
+            finding_compare.entry(
+                finding(severity="ai_reminder", path=f"src/a{i}.rs"), HEAD)
+            for i in range(10)
+        ]
+        full, _ = sticky_publish.render_sticky(entries, HEAD, SERVER, REPOSITORY,
+                                               budget=1_000_000)
+        floor, _ = sticky_publish.render_sticky(entries, HEAD, SERVER, REPOSITORY,
+                                                budget=0)
+
+        self.assertEqual(bullet_count(full, "- **"), 20)
+        self.assertEqual(hidden_count(full), 0)
+        self.assertLess(full.index("### Warnings"), full.index("<details>"))
+
+        for budget in range(len(floor), len(full), 7):
+            with self.subTest(budget=budget):
+                body, _ = sticky_publish.render_sticky(
+                    entries, HEAD, SERVER, REPOSITORY, budget=budget)
+
+                self.assertLessEqual(len(body), budget)
+                self.assertEqual(body.count("<details>"),
+                                 body.count("</details>"))
+                self.assertIn("10 warnings, 10 AI reminders.", body)
+                self.assertEqual(bullet_count(body, "- **") + hidden_count(body),
+                                 20)
+
+    def test_ai_markup_in_a_title_cannot_restructure_the_sticky_report(self):
+        transport = FakeTransport()
+        hostile = finding(severity="ai_reminder", code="SYM001",
+                          title="Use <details open> here")
+
+        publish_once(transport, [hostile])
+
+        body = sticky_body(transport)
+        self.assertEqual(body.count("<details"), 1)
+        self.assertEqual(body.count("</details>"), 1)
+        self.assertIn("&lt;details open>", body)
+        self.assertLess(body.index("</details>"), body.index(sticky_publish.MARKER))
 
     def test_hints_render_in_their_own_section(self):
         transport = FakeTransport()
@@ -489,6 +645,89 @@ class DeltaRenderingTests(unittest.TestCase):
         self.assertLessEqual(len(delta), sticky_publish.MAX_COMMENT_CHARS)
         self.assertIn("not shown (report size budget)", delta)
         self.assertIn("5000 added, 0 cleared", delta)
+
+    def test_ai_delta_disclosure_should_omit_rather_than_leave_markup_open(self):
+        added = [{"record": finding(severity="ai_reminder",
+                                    path=f"src/f{i}.rs", message="m" * 40),
+                  "revision": HEAD}
+                 for i in range(20)]
+        full = sticky_publish.render_delta(added, [], "url", HEAD, SERVER,
+                                           REPOSITORY, budget=1_000_000)
+        floor = sticky_publish.render_delta(added, [], "url", HEAD, SERVER,
+                                            REPOSITORY, budget=0)
+        ai_prefixes = ("- added: ", "- cleared: ")
+        self.assertEqual(bullet_count(full, ai_prefixes), 20)
+        self.assertEqual(hidden_count(full), 0)
+
+        omitted = partial = 0
+        for budget in range(len(floor), len(full), 7):
+            with self.subTest(budget=budget):
+                delta = sticky_publish.render_delta(
+                    added, [], "url", HEAD, SERVER, REPOSITORY, budget=budget)
+
+                self.assertLessEqual(len(delta), budget)
+                self.assertEqual(delta.count("<details>"),
+                                 delta.count("</details>"))
+                self.assertIn("20 added, 0 cleared", delta)
+                shown = bullet_count(delta, ai_prefixes)
+                self.assertEqual(shown + hidden_count(delta), 20)
+                if "<details>" not in delta:
+                    omitted += 1
+                    self.assertEqual(shown, 0)
+                elif hidden_count(delta):
+                    partial += 1
+        self.assertGreater(omitted, 0)
+        self.assertGreater(partial, 0)
+
+    def test_delta_should_bound_mixed_ordinary_and_ai_sections(self):
+        added = [
+            {"record": finding(severity="warning", code="DOC008",
+                               path=f"src/w{i}.rs", message="m" * 60),
+             "revision": HEAD}
+            for i in range(10)
+        ] + [
+            {"record": finding(severity="ai_reminder", path=f"src/a{i}.rs",
+                               message="m" * 40),
+             "revision": HEAD}
+            for i in range(10)
+        ]
+        full = sticky_publish.render_delta(added, [], "url", HEAD, SERVER,
+                                           REPOSITORY, budget=1_000_000)
+        floor = sticky_publish.render_delta(added, [], "url", HEAD, SERVER,
+                                            REPOSITORY, budget=0)
+        prefixes = ("- **", "- added: ", "- cleared: ")
+
+        self.assertEqual(bullet_count(full, prefixes), 20)
+        self.assertEqual(hidden_count(full), 0)
+        self.assertLess(full.index("### Added"), full.index("<details>"))
+
+        for budget in range(len(floor), len(full), 7):
+            with self.subTest(budget=budget):
+                delta = sticky_publish.render_delta(
+                    added, [], "url", HEAD, SERVER, REPOSITORY, budget=budget)
+
+                self.assertLessEqual(len(delta), budget)
+                self.assertEqual(delta.count("<details>"),
+                                 delta.count("</details>"))
+                self.assertIn("20 added, 0 cleared", delta)
+                self.assertEqual(bullet_count(delta, prefixes) + hidden_count(delta),
+                                 20)
+
+    def test_ai_markup_in_a_title_cannot_restructure_the_delta(self):
+        transport = FakeTransport()
+        publish_once(transport, findings_doc(finding()))
+        transport.head_sha = NEW_HEAD
+        hostile = finding(severity="ai_reminder", code="SYM001",
+                          title="Use </DeTaIlS > here")
+
+        summary = publish_once(transport, findings_doc(finding(), hostile),
+                               revision=NEW_HEAD)
+
+        self.assertTrue(summary["delta_posted"])
+        delta = transport.calls[-1][2]["body"]
+        self.assertEqual(delta.count("<details"), 1)
+        self.assertEqual(delta.count("</details>"), 1)
+        self.assertIn("&lt;/DeTaIlS >", delta)
 
 
 if __name__ == "__main__":

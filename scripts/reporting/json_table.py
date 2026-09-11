@@ -11,6 +11,8 @@ writes (the file path is the argument) and renders Markdown:
 - Guidance: split later message sentences into sub-bullets for readability.
 - Hints: show suggestions to investigate in a separate trailing section.
 - Reminders: note their default changed-line scope in a separate section.
+- AI reminders: collapse their section in a `<details>` block, so a human
+  reading the report sees the heading without the AI-only guidance.
 - Change records (`severity: "success"`) render as a "Changes" table.
 
 Location links use an `.../blob/<sha>/` URL prefix to identify an exact commit:
@@ -45,7 +47,17 @@ FINDING_SECTIONS = (
     ("warning", "Warnings"),
     ("hint", "Hints - consider looking at these"),
     ("reminder", "Reminders - changed lines by default"),
+    ("ai_reminder", "Reminders for AI Language Models"),
 )
+
+# Findings of this severity are guidance for AI agents, not for a human
+# skimming the report, so their section renders collapsed.
+COLLAPSED_SEVERITY = "ai_reminder"
+
+
+def section_title(severity):
+    """Configured section title for `severity`."""
+    return next(header for code, header in FINDING_SECTIONS if code == severity)
 
 
 def fmt_line(raw):
@@ -106,6 +118,19 @@ def split_guidance(message):
     return parts[0], parts[1:]
 
 
+# A finding message carries untrusted repository text. Raw `details` markup in
+# it would open a nested disclosure or consume the generated closing tag.
+#
+# Escaping only the `<` delimiter keeps the literal tag text, including any
+# attributes, while leaving the generated wrapper untouched.
+_DETAILS_DELIMITER = re.compile(r"<(?=/?details(?=[\s/>]))", re.IGNORECASE)
+
+
+def escape_details_markup(text):
+    """Render a `details` tag delimiter as text so content cannot restructure markup."""
+    return _DETAILS_DELIMITER.sub("&lt;", text)
+
+
 def finding_lines(record, base=None):
     """Markdown lines for one lint finding: bullet, summary, sub-bullets."""
     code = record.get("code", "")
@@ -129,15 +154,15 @@ def finding_lines(record, base=None):
     lines = [f"- **{code_text} {title}** - {location(path, record.get('line'), base)}"]
     lines.append(f"  {summary}")
     lines.extend(f"  - {part}" for part in guidance)
-    return lines
+    return [escape_details_markup(line) for line in lines]
 
 
-def counts_line(errors, warnings, hints, reminders, changes):
+def counts_line(errors, warnings, hints, reminders, ai_reminders, changes):
     """Counts of findings and changes, omitting empty groups."""
     parts = []
     for count, noun in ((errors, "error"), (warnings, "warning"),
                         (hints, "hint"), (reminders, "reminder"),
-                        (changes, "change")):
+                        (ai_reminders, "AI reminder"), (changes, "change")):
         if count:
             parts.append(f"{count} {noun}" + ("" if count == 1 else "s"))
     return ", ".join(parts) + "."
@@ -171,11 +196,19 @@ def render(json_path):
         group = groups[severity]
         if not group:
             continue
+        collapsed = severity == COLLAPSED_SEVERITY
         out.append("")
-        out.append(f"### {header}")
+        if collapsed:
+            out.append("<details>")
+            out.append(f"<summary>{header}</summary>")
+        else:
+            out.append(f"### {header}")
         for record in group:
             out.append("")
             out.extend(finding_lines(record))
+        if collapsed:
+            out.append("")
+            out.append("</details>")
 
     if changes:
         out.append("")

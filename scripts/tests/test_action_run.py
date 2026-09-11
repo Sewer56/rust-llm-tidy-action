@@ -713,6 +713,22 @@ exit 1
         state = sticky_publish.decode_state(body)
         self.assertEqual(state["findings"][0]["record"]["severity"], "reminder")
 
+    def test_clean_pr_run_should_publish_ai_reminders_collapsed(self):
+        write_stub(self.tidy_hint,
+                   TIDY_HINT_STUB.replace('"hint"', '"ai_reminder"'))
+
+        result = self.run_action(RLT_BIN=str(self.tidy_hint))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(self.api_posts()), 1)
+        body = self.posted_body()
+        self.assertIn("<summary>Reminders for AI Language Models</summary>", body)
+        self.assertIn("1 AI reminder.", body)
+        self.assertIn("      consider pre-allocating the buffer", body)
+        self.assertNotIn("<details open>", body)
+        state = sticky_publish.decode_state(body)
+        self.assertEqual(state["findings"][0]["record"]["severity"], "ai_reminder")
+
     def test_non_pr_apply_run_publishes_nothing(self):
         self.untidy_commit_on_feature()
         result = self.run_action(IS_PR="false")

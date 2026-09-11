@@ -5,6 +5,9 @@ The "sticky" report is a comment updated in place, not recreated every run.
 It groups findings by severity and shows their full messages as literal text.
 It also stores a hidden snapshot for the next comparison.
 
+AI reminder findings stay collapsed in a `Reminders for AI Language Models`
+section, both in the report and in the follow-up comment.
+
 Unchanged findings keep links to their original commits.
 Added or cleared findings get a separate, compact follow-up comment.
 Unchanged results need no comment, unless duplicate reports need consolidation.
@@ -134,8 +137,17 @@ def _join_len(lines):
     return sum(len(line) for line in lines) + len(lines) - 1
 
 
+def _append_cost(lines):
+    """Exact number of characters appending `lines` adds to the joined body."""
+    return sum(len(line) + 1 for line in lines)
+
+
 def _append_bounded(lines, sections, visible_budget):
-    """Append `(header, bullets)` sections to `lines`, truncated to fit.
+    """Append `(header, bullets, collapsed)` sections to `lines`, truncated to fit.
+
+    Collapsed sections wrap their bullets in a `<details>` block. The block is
+    emitted only when its wrapper and closing tag fit, so a truncated report
+    never leaves markup open or shows an empty disclosure.
 
     `visible_budget` is the exact join length the appended lines may grow
     `lines` to.
@@ -144,10 +156,31 @@ def _append_bounded(lines, sections, visible_budget):
     join cost (separator plus text), so the returned hidden count is the
     only thing the caller must still make room for.
     """
-    total = sum(len(bullets) for _, bullets in sections)
+    total = sum(len(bullets) for _, bullets, _ in sections)
     used = _join_len(lines)
     shown = 0
-    for header, bullets in sections:
+    for header, bullets, collapsed in sections:
+        if not bullets:
+            continue
+        if collapsed:
+            open_lines = ["", "<details>", f"<summary>{header}</summary>", ""]
+            close_lines = ["", "</details>"]
+            open_cost = _append_cost(open_lines)
+            close_cost = _append_cost(close_lines)
+            if used + open_cost + 1 + len(bullets[0]) + close_cost > visible_budget:
+                return total - shown
+            lines += open_lines
+            used += open_cost
+            for bullet in bullets:
+                if used + 1 + len(bullet) + close_cost > visible_budget:
+                    lines += close_lines
+                    return total - shown
+                lines.append(bullet)
+                used += 1 + len(bullet)
+                shown += 1
+            lines += close_lines
+            continue
+
         head = f"### {header}"
         if used + 2 + len(head) > visible_budget:
             return total - shown
@@ -162,10 +195,16 @@ def _append_bounded(lines, sections, visible_budget):
     return 0
 
 
-def _bullet(record, revision, server_url, repository):
-    """One compact `code title - location` bullet line for a finding."""
+def _bullet(record, revision, server_url, repository, status=None):
+    """One compact `code title - location` bullet line for a finding.
+
+    `status` prefixes the bullet when one section mixes added and cleared
+    findings; single-status sections pass none.
+    """
     base = f"{server_url.rstrip('/')}/{repository}/blob/{revision}/"
-    return json_table.finding_lines(record, base)[0]
+    # `finding_lines` bullets open with `- `; keep that marker once.
+    bullet = json_table.finding_lines(record, base)[0]
+    return f"- {status}: {bullet[2:]}" if status else bullet
 
 
 REMINDER_NOTE = (
@@ -191,8 +230,11 @@ def _sections(entries, server_url, repository):
             )
 
     return [
-        ("Reminders\n\n" + REMINDER_NOTE + "\n" if severity == "reminder" else header,
-         grouped[severity])
+        (
+            "Reminders\n\n" + REMINDER_NOTE + "\n" if severity == "reminder" else header,
+            grouped[severity],
+            severity == json_table.COLLAPSED_SEVERITY,
+        )
         for severity, header in json_table.FINDING_SECTIONS
         if grouped[severity]
     ]
@@ -248,7 +290,7 @@ def _sticky_body(entries, state, overflow, server_url, repository, budget):
     # appending it can never push the body past `budget`.
     snapshot = encode_state(state)
     sections = _sections(entries, server_url, repository)
-    total_bullets = sum(len(bullets) for _, bullets in sections)
+    total_bullets = sum(len(bullets) for _, bullets, _ in sections)
     reserve = 1 + len(_TRUNCATED_NOTE.format(count=total_bullets)) \
         if total_bullets else 0
     hidden = _append_bounded(
@@ -274,17 +316,28 @@ def render_delta(added, cleared, sticky_url, old_revision, server_url, repositor
         "",
         f"Current findings: [full report]({sticky_url}).",
     ]
-    groups = (
-        ("Added", [(a["record"], a["revision"]) for a in added]),
-        ("Cleared", [(c["record"], c["revision"]) for c in cleared]),
-    )
-    sections = [
-        (header, [_bullet(record, revision, server_url, repository)
-                  for record, revision in pairs])
-        for header, pairs in groups
-        if pairs
-    ]
-    total_bullets = sum(len(bullets) for _, bullets in sections)
+    sections = []
+    ai_bullets = []
+    for status, entries in (("added", added), ("cleared", cleared)):
+        bullets = []
+        for entry in entries:
+            record = entry["record"]
+            if record.get("severity") == json_table.COLLAPSED_SEVERITY:
+                ai_bullets.append(
+                    _bullet(record, entry["revision"], server_url, repository, status)
+                )
+            else:
+                bullets.append(
+                    _bullet(record, entry["revision"], server_url, repository)
+                )
+        if bullets:
+            sections.append((status.capitalize(), bullets, False))
+    if ai_bullets:
+        sections.append(
+            (json_table.section_title(json_table.COLLAPSED_SEVERITY), ai_bullets,
+             True)
+        )
+    total_bullets = sum(len(bullets) for _, bullets, _ in sections)
     reserve = 1 + len(_TRUNCATED_NOTE.format(count=total_bullets)) \
         if total_bullets else 0
     hidden = _append_bounded(lines, sections, budget - reserve)

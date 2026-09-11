@@ -18,7 +18,7 @@ from collections import Counter
 
 # Lint-finding severities the report tracks. Change records
 # (`severity: "success"`) and unknown severities never enter comparisons.
-FINDING_SEVERITIES = ("error", "warning", "hint", "reminder")
+FINDING_SEVERITIES = ("error", "warning", "hint", "reminder", "ai_reminder")
 
 # Identity fields: everything a finding reports except its line (location
 # moves are not changes) and its title (presentation only).

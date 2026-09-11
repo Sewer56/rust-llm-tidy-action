@@ -49,6 +49,7 @@ class LoadRecordsTests(unittest.TestCase):
             finding(severity="warning"),
             finding(severity="hint"),
             finding(severity="reminder"),
+            finding(severity="ai_reminder"),
             {"severity": "catastrophe", "code": "X", "path": "a.rs",
              "message": "m"},
             "not even a dict",
@@ -58,7 +59,7 @@ class LoadRecordsTests(unittest.TestCase):
 
         self.assertEqual(
             [record["severity"] for record in kept],
-            ["error", "warning", "hint", "reminder"]
+            ["error", "warning", "hint", "reminder", "ai_reminder"]
         )
 
 
@@ -107,6 +108,13 @@ class MergeTests(unittest.TestCase):
         new = [finding(title="updated documentation title")]
         retained, added, cleared = merge(old, new)
         self.assertEqual((len(retained), len(added), len(cleared)), (1, 0, 0))
+
+    def test_ai_reminder_severity_is_part_of_identity(self):
+        retained, added, cleared = merge([finding(severity="reminder")],
+                                         [finding(severity="ai_reminder")])
+        self.assertFalse(retained)
+        self.assertEqual([e["record"]["severity"] for e in cleared], ["reminder"])
+        self.assertEqual([e["record"]["severity"] for e in added], ["ai_reminder"])
 
     def test_empty_baseline_marks_everything_added_and_vice_versa(self):
         current = [finding(), finding(severity="hint")]

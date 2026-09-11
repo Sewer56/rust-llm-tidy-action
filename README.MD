@@ -274,8 +274,20 @@ Example preview (file locations are illustrative):
 > ### Warnings
 > - **[`DOC008`][lints-docs] long line** - `src/lib.rs:9`
 
+AI reminders render in a collapsed section:
+
+```markdown
+<details>
+<summary>Reminders for AI Language Models</summary>
+
+- **[`TEXT007`](https://github.com/Sewer56/rust-llm-tidy/blob/main/docs/lints.md#codes) passive construction** -
+  [src/lib.rs:31](<<repo>/blob/<sha>/src/lib.rs#L31>)
+
+</details>
+```
+
 Added or cleared findings get a follow-up; unchanged results stay quiet.
-Clearing all findings shows “No current findings.”
+Clearing all findings shows "No current findings."
 
 #### Per-run comments
 
