@@ -293,7 +293,7 @@ runs:
       if: >-
         inputs.binary-source == 'git' &&
         inputs.install-rust-toolchain == 'true'
-      uses: actions-rust-lang/setup-rust-toolchain@v1
+      uses: actions-rust-lang/setup-rust-toolchain@v2
       with:
         toolchain: ${{ inputs.rust-toolchain }}
         cache: false
